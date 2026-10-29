@@ -83,6 +83,7 @@ class PiperEnv:
         self.cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         self.grasp_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link7")
         self.target_mocap_id = 0  # 唯一的 mocap 体
+        self.marker_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "target_marker_geom")
 
     @property
     def action_dim(self):
@@ -131,9 +132,15 @@ class PiperEnv:
         return float(self.data.qpos[self.cube_joint_id + 2])
 
     def render_image(self, size=None):
-        """顶部相机渲染图（RGB uint8）。size 指定输出边长，默认 image_size（数据集用）。"""
+        """顶部相机渲染图（RGB uint8）。size 指定输出边长，默认 image_size（数据集用）。
+
+        渲染时临时隐藏绿色目标标记球（alpha=0），避免它污染观测图。
+        """
+        rgba = self.model.geom_rgba[self.marker_geom_id].copy()
+        self.model.geom_rgba[self.marker_geom_id, 3] = 0.0  # 隐藏
         self.renderer.update_scene(self.data, camera=self.camera)
         img = self.renderer.render()  # HWC RGB uint8，原生 render_width×render_height
+        self.model.geom_rgba[self.marker_geom_id] = rgba  # 恢复
         size = size or self.image_size
         if img.shape[0] != size:
             import cv2
