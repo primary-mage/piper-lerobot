@@ -10,7 +10,7 @@
 
 按键：
   w/s 末端前后(x)   a/d 末端左右(y)   r/f 末端升降(z)
-  g  夹爪开合切换   n/Enter 下一条   q/Esc 退出
+  g 夹爪开合切换   n/Enter 下一条   x 丢弃本条   q/Esc 退出
 """
 import argparse
 import os
@@ -27,6 +27,7 @@ from piper_sim import PiperEnv
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 POS_DELTA = 0.01  # 键盘每步末端移动 0.01 m
+GRIPPER_RAMP_STEPS = 15  # 夹爪开合斜坡步数（10fps 下 1.5 秒），避免惯性冲击带歪手臂
 
 
 def stick_to_delta(v, deadzone=3000, scale=0.015):
@@ -81,7 +82,7 @@ def main():
         print("       w/s 前后  a/d 左右  r/f 升降  g 夹爪开合  n 下一条  q 退出")
 
     # 键盘状态（pynput，线程间共享）
-    state = {"pressed": set(), "toggle_count": 0, "last_g": 0.0, "new_episode": False, "quit": False}
+    state = {"pressed": set(), "toggle_count": 0, "last_g": 0.0, "new_episode": False, "quit": False, "discard_episode": False}
 
     def on_press(key):
         state["pressed"].add(key)
@@ -94,6 +95,8 @@ def main():
                     state["last_g"] = now
             elif ch in ("n", "\r"):
                 state["new_episode"] = True
+            elif ch == "x":
+                state["discard_episode"] = True
             elif ch == "q":
                 state["quit"] = True
         except Exception:  # noqa: BLE001
@@ -125,22 +128,29 @@ def main():
                                 state["toggle_count"] += 1
                             elif code == "BTN_START":
                                 state["new_episode"] = True
+                            elif code == "BTN_EAST":  # B 键：丢弃当前条
+                                state["discard_episode"] = True
                             elif code == "BTN_SELECT":
                                 state["quit"] = True
                 except Exception:  # noqa: BLE001
                     time.sleep(0.02)
 
         threading.Thread(target=gamepad_thread, daemon=True).start()
-        print("[提示] 使用 Xbox 手柄：左摇杆=前后左右 右摇杆上下=升降 A=夹爪 Start=下一条 Select=退出")
+        print("[提示] 使用 Xbox 手柄：左摇杆=前后左右 右摇杆上下=升降 A=夹爪 B=丢弃本条 Start=下一条 Select=退出")
 
-    ep = 0
+    ep = 0      # 尝试计数（seed 用）
+    saved = 0   # 已保存（好数据）计数
     try:
-        while ep < args.num_episodes and not state["quit"] and (viewer is None or viewer.is_running()):
+        while saved < args.num_episodes and not state["quit"] and (viewer is None or viewer.is_running()):
             qpos = env.reset(seed=ep)
             target_pos = env.get_grasp_pos().copy()  # 初始目标 = 当前末端位置
-            gripper = 0.0  # 夹爪张开
+            gripper = 0.0        # 当前夹爪目标（斜坡平滑）
+            gripper_goal = 0.0   # 夹爪目标（切换）
+            ep_frames = []       # 本集帧缓存（结束才决定是否写入）
             state["new_episode"] = False
+            state["discard_episode"] = False
             ep_done = False
+            discard = False
             step = 0
             last_reward = 0.0
             while not ep_done and step < args.max_steps and not state["quit"] and (viewer is None or viewer.is_running()):
@@ -163,11 +173,17 @@ def main():
                         target_pos[2] += args.pos_delta
                     if kb.KeyCode.from_char("f") in state["pressed"]:
                         target_pos[2] -= args.pos_delta
-                # 夹爪切换（用计数器，处理所有积压的按键，避免丢事件）
+                # 夹爪切换（计数器 → 切换目标）
                 while state["toggle_count"] > 0:
                     state["toggle_count"] -= 1
-                    gripper = 0.035 if gripper < 0.02 else 0.0
-                    print(f"  夹爪 → {'闭合' if gripper > 0.02 else '张开'}")
+                    gripper_goal = 0.035 if gripper_goal < 0.02 else 0.0
+                    print(f"  夹爪目标 → {'闭合' if gripper_goal > 0.02 else '张开'}")
+                # 斜坡平滑过渡（避免惯性冲击带歪手臂）
+                ramp = 0.035 / GRIPPER_RAMP_STEPS
+                if gripper < gripper_goal:
+                    gripper = min(gripper + ramp, gripper_goal)
+                elif gripper > gripper_goal:
+                    gripper = max(gripper - ramp, gripper_goal)
 
                 # IK 解算手臂关节 + 移动绿色目标标记
                 arm_q = env.solve_ik(target_pos)
@@ -175,14 +191,14 @@ def main():
                 action = np.concatenate([arm_q, [gripper]]).astype(np.float32)
 
                 if step % 50 == 0:
-                    print(f"  [{ep+1}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} "
+                    print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} "
                           f"夹爪={'合' if gripper > 0.02 else '开'} 方块高={env.cube_height():.3f}")
 
                 img_native = env.render_image(480)   # 原生高分辨率顶部相机
                 img = cv2.resize(img_native, (96, 96))  # 数据集 96×96
                 qpos_next, reward = env.step(action, substeps)
                 last_reward = reward
-                ds.add_frame({
+                ep_frames.append({
                     "observation.image": img,
                     "observation.state": qpos,
                     "action": action,
@@ -200,12 +216,21 @@ def main():
                     cv2.waitKey(1)
                 time.sleep(1.0 / args.fps)
 
+                if state["discard_episode"]:
+                    discard = True
+                    ep_done = True
                 if state["new_episode"]:
                     ep_done = True
 
-            ds.save_episode()
+            if discard:
+                print(f"✗ 第 {ep+1} 次尝试已丢弃（失败数据不保存）")
+            else:
+                for frame in ep_frames:
+                    ds.add_frame(frame)
+                ds.save_episode()
+                saved += 1
+                print(f"✓ 已保存 {saved}/{args.num_episodes} | 方块高度 {env.cube_height():.3f} | 奖励 {last_reward:.3f} | 帧数 {len(ep_frames)}")
             ep += 1
-            print(f"✓ episode {ep}/{args.num_episodes} 已保存 | 方块高度 {env.cube_height():.3f} | 奖励 {last_reward:.3f}")
     finally:
         state["stop"] = True
         ds.finalize()
