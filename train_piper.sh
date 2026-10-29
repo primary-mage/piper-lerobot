@@ -11,10 +11,9 @@ DATASET="local/piper_keyboard"   # 与 sim_collect_piper.py 的默认 repo_id �
 OUT="$HOME/lerobot_outputs/act_piper_keyboard"
 
 info "训练 ACT | 数据集: $DATASET | 步数: $STEPS"
-rm -rf "$OUT"   # 避免 output_dir 已存在的报错
-mkdir -p "$OUT"
+rm -rf "$OUT" "$OUT.log"   # $OUT 必须不存在（lerobot-train 会自己创建），日志存独立文件
 
-# tee 同时把日志打到终端 + 存文件，训练完可用 python plot_training.py $OUT/train.log 画曲线
+# tee 同时把日志打到终端 + 存文件，训练完可用 python plot_training.py $OUT.log 画曲线
 lerobot-train \
   --policy.type=act \
   --dataset.repo_id="$DATASET" \
@@ -27,7 +26,7 @@ lerobot-train \
   --wandb.enable=true \
   --wandb.mode=online \
   --wandb.project=piper_grasp \
-  --policy.push_to_hub=false 2>&1 | tee "$OUT/train.log"
+  --policy.push_to_hub=false 2>&1 | tee "$OUT.log"
 
 info "训练完成 ✓ 检查点: $OUT/checkpoints/last/pretrained_model"
-info "loss 曲线：python plot_training.py $OUT/train.log"
+info "loss 曲线：python plot_training.py $OUT.log"
