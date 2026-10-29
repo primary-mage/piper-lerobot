@@ -8,10 +8,13 @@
   python sim_rollout_piper.py --checkpoint <检查点路径> --num_episodes 3
 """
 import argparse
+import time
 
+import cv2
 import numpy as np
 import safetensors.torch as st
 import torch
+from mujoco import viewer as mujoco_viewer
 
 from piper_sim import PiperEnv
 from lerobot.policies.act.modeling_act import ACTPolicy
@@ -36,6 +39,7 @@ def main():
     ap.add_argument("--num_episodes", type=int, default=3)
     ap.add_argument("--max_steps", type=int, default=200)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--no_viewer", action="store_true", help="不开图形界面（headless）")
     args = ap.parse_args()
 
     device = args.device
@@ -45,36 +49,53 @@ def main():
     env = PiperEnv(image_size=96)
     substeps = max(1, round(0.1 / env.model.opt.timestep))  # 与采集端一致（10fps）
 
-    for ep in range(args.num_episodes):
-        policy.reset()
-        qpos = env.reset(seed=100 + ep)
-        max_h = 0.0
-        for _ in range(args.max_steps):
-            img = env.render_image()  # (96,96,3) uint8
+    # 原生 viewer（图形界面）
+    viewer = None
+    if not args.no_viewer:
+        viewer = mujoco_viewer.launch_passive(env.model, env.data, show_left_ui=False, show_right_ui=False)
+        print("[提示] MuJoCo 图形界面已打开，正在回放策略抓取（鼠标可旋转视角）")
 
-            # 图像：/255 到 [0,1] → CHW → ImageNet 归一化
-            img_f = img.astype(np.float32) / 255.0
-            img_chw = img_f.transpose(2, 0, 1)
-            img_norm = (img_chw - stats["img_mean"]) / stats["img_std"]
-            # 状态：MEAN_STD 归一化
-            state_norm = (qpos - stats["state_mean"]) / stats["state_std"]
+    try:
+        for ep in range(args.num_episodes):
+            policy.reset()
+            qpos = env.reset(seed=100 + ep)
+            max_h = 0.0
+            for _ in range(args.max_steps):
+                img = env.render_image()  # (96,96,3) uint8
 
-            batch = {
-                "observation.state": torch.from_numpy(state_norm).float().unsqueeze(0).to(device),
-                "observation.image": torch.from_numpy(img_norm).float().unsqueeze(0).to(device),
-            }
-            with torch.inference_mode():
-                action = policy.select_action(batch)
-            # 反归一化动作
-            action = action * torch.from_numpy(stats["action_std"]).to(device) + torch.from_numpy(stats["action_mean"]).to(device)
-            action_np = action[0].cpu().numpy().astype(np.float32)
+                # 图像：/255 到 [0,1] → CHW → ImageNet 归一化
+                img_f = img.astype(np.float32) / 255.0
+                img_chw = img_f.transpose(2, 0, 1)
+                img_norm = (img_chw - stats["img_mean"]) / stats["img_std"]
+                # 状态：MEAN_STD 归一化
+                state_norm = (qpos - stats["state_mean"]) / stats["state_std"]
 
-            qpos, _reward = env.step(action_np, substeps)
-            max_h = max(max_h, env.cube_height())
+                batch = {
+                    "observation.state": torch.from_numpy(state_norm).float().unsqueeze(0).to(device),
+                    "observation.image": torch.from_numpy(img_norm).float().unsqueeze(0).to(device),
+                }
+                with torch.inference_mode():
+                    action = policy.select_action(batch)
+                # 反归一化动作
+                action = action * torch.from_numpy(stats["action_std"]).to(device) + torch.from_numpy(stats["action_mean"]).to(device)
+                action_np = action[0].cpu().numpy().astype(np.float32)
 
-        print(f"episode {ep + 1}: 方块最高高度 = {max_h:.3f} m (初始 ~0.105，>0.16 视为抓起)")
+                qpos, _reward = env.step(action_np, substeps)
+                max_h = max(max_h, env.cube_height())
 
-    env.close()
+                if viewer is not None:
+                    viewer.sync()
+                    # 相机视角预览（顶部相机 = 策略"看到"的观测图）
+                    cam = env.render_image(480)
+                    cv2.imshow("Top Camera (policy view)", cv2.cvtColor(cam, cv2.COLOR_RGB2BGR))
+                    cv2.waitKey(1)
+                    time.sleep(0.1)  # 10fps 回放，便于观察
+
+            print(f"episode {ep + 1}: 方块最高高度 = {max_h:.3f} m (初始 ~0.105，>0.16 视为抓起)")
+    finally:
+        env.close()
+        if viewer is not None:
+            viewer.close()
     print("sim2sim rollout 完成")
 
 
