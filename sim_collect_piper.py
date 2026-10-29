@@ -63,8 +63,12 @@ def main():
 
     if args.overwrite:
         ds_dir = args.root or os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.repo_id}")
-        shutil.rmtree(ds_dir, ignore_errors=True)
-        print(f"[提示] 已删除旧数据集: {ds_dir}")
+        if os.path.exists(ds_dir):
+            backup = f"{ds_dir}.bak.{time.strftime('%Y%m%d_%H%M%S')}"
+            shutil.move(ds_dir, backup)
+            print(f"[提示] 旧数据集已备份（未删除）→ {backup}")
+        else:
+            print(f"[提示] 无旧数据集，直接新建")
 
     env = PiperEnv(image_size=96)
     # 每帧推进的物理步数：让 1 帧 ≈ 1/fps 秒模拟时间（10fps 下 = 50 步 × 0.002s）

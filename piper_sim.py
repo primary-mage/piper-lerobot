@@ -81,7 +81,9 @@ class PiperEnv:
         self.gripper_qpos_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_JOINT)
         self.act_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in ACTUATOR_NAMES]
         self.cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
-        self.grasp_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link7")
+        # 夹爪两指 body id：IK 参考点用「两指中点」——开合对称，中点稳定不随夹爪动
+        self.grasp_body_id7 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link7")
+        self.grasp_body_id8 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link8")
         self.target_mocap_id = 0  # 唯一的 mocap 体
         self.marker_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "target_marker_geom")
 
@@ -148,32 +150,36 @@ class PiperEnv:
         return img
 
     def get_grasp_pos(self):
-        """当前夹爪参考点（link7）的世界坐标 (3,)。"""
-        return self.data.xpos[self.grasp_body_id].copy()
+        """当前夹爪参考点（两指中点）的世界坐标 (3,)。中点不随夹爪开合变化。"""
+        return (self.data.xpos[self.grasp_body_id7] + self.data.xpos[self.grasp_body_id8]) / 2.0
 
     def set_target_marker(self, pos):
         """移动绿色目标标记球到 pos。"""
         self.data.mocap_pos[self.target_mocap_id] = pos
 
     def solve_ik(self, target_pos, max_iter=60, tol=1e-3, damping=1e-6):
-        """阻尼最小二乘 IK：求使夹爪参考点到达 target_pos 的 6 个手臂关节角。
+        """阻尼最小二乘 IK：求使夹爪参考点（两指中点）到达 target_pos 的 6 个手臂关节角。
 
         不改动真实物理状态（迭代用临时 qpos，结束后恢复）。
         """
         orig = np.array([self.data.qpos[i] for i in self.arm_qpos_ids])
         qpos = orig.copy()
-        jacp = np.zeros((3, self.model.nv))
-        jacr = np.zeros((3, self.model.nv))
+        jacp7 = np.zeros((3, self.model.nv))
+        jacr7 = np.zeros((3, self.model.nv))
+        jacp8 = np.zeros((3, self.model.nv))
+        jacr8 = np.zeros((3, self.model.nv))
         for _ in range(max_iter):
             for i, qid in enumerate(self.arm_qpos_ids):
                 self.data.qpos[qid] = qpos[i]
             mujoco.mj_forward(self.model, self.data)
-            cur = self.data.xpos[self.grasp_body_id]
+            # 两指中点（开合对称，中点稳定）
+            cur = (self.data.xpos[self.grasp_body_id7] + self.data.xpos[self.grasp_body_id8]) / 2.0
             err = np.asarray(target_pos, dtype=np.float64) - cur
             if np.linalg.norm(err) < tol:
                 break
-            mujoco.mj_jacBody(self.model, self.data, jacp, jacr, self.grasp_body_id)
-            J = jacp[:, :6]  # 6 个手臂关节 = dof 0~5
+            mujoco.mj_jacBody(self.model, self.data, jacp7, jacr7, self.grasp_body_id7)
+            mujoco.mj_jacBody(self.model, self.data, jacp8, jacr8, self.grasp_body_id8)
+            J = (jacp7[:, :6] + jacp8[:, :6]) / 2.0  # 中点位置雅可比（6 个手臂关节）
             A = J @ J.T + damping * np.eye(3)
             dq = J.T @ np.linalg.solve(A, err)
             qpos += dq
