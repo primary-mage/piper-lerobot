@@ -12,16 +12,20 @@ OUT="$HOME/lerobot_outputs/act_piper_keyboard"
 
 info "训练 ACT | 数据集: $DATASET | 步数: $STEPS"
 rm -rf "$OUT"   # 避免 output_dir 已存在的报错
+mkdir -p "$OUT"
 
+# tee 同时把日志打到终端 + 存文件，训练完可用 python plot_training.py $OUT/train.log 画曲线
 lerobot-train \
   --policy.type=act \
   --dataset.repo_id="$DATASET" \
   --policy.device=cuda \
   --batch_size=4 \
   --steps="$STEPS" \
+  --log_freq=100 \
   --output_dir="$OUT" \
   --job_name=act_piper \
   --wandb.enable=false \
-  --policy.push_to_hub=false
+  --policy.push_to_hub=false 2>&1 | tee "$OUT/train.log"
 
 info "训练完成 ✓ 检查点: $OUT/checkpoints/last/pretrained_model"
+info "loss 曲线：python plot_training.py $OUT/train.log"
