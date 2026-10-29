@@ -1,118 +1,157 @@
-# 松灵 Piper + LeRobot 自主抓取 · 本地环境全套脚本
+# 松灵 Piper + LeRobot 自主抓取 · 仿真闭环（sim2sim）
 
-这套脚本把你从零到“Piper 自主抓取”的完整流程串起来，针对 **RTX 5060（8GB 显存）** 做了显存优化。
+在 **MuJoCo** 里仿真松灵 Piper 六轴机械臂，用**键盘 / Xbox 手柄做笛卡尔遥操作**采集数据，
+训练 **ACT** 策略，再回到仿真里**部署抓取**。全程脱离真机，用于把「采集 → 训练 → 部署」整条链路跑通、摸熟。
 
-## 文件说明
+> 最终目标是把这套流程迁移到真机（piper_sdk + 拖拽示教），仿真版本验证的是软件链路和手感。
+
+---
+
+## 一、环境要求
+
+| 项 | 要求 |
+|---|---|
+| 系统 | Ubuntu 24.04（x86_64） |
+| 显卡 | NVIDIA RTX 5060（8GB），驱动 ≥ 570 |
+| 环境管理 | conda（miniconda3） |
+| Python | 3.12 |
+| conda 环境 | 已建好的 `lerobot`（含 torch cu130 + lerobot 0.6.1 + piper 插件 + mujoco） |
+
+```bash
+conda activate lerobot          # 每次进项目先激活
+cd /home/mage/piper_ws/lerobot_setup
+```
+
+---
+
+## 二、核心 4 步（采集 → 训练 → 部署 → 看曲线）
+
+### 第 1 步：采集数据（遥操作）
+
+```bash
+# Xbox 手柄遥操作（推荐，摇杆控制末端）
+python sim_collect_piper.py --num_episodes 30 --overwrite --controller gamepad
+
+# 或键盘遥操作
+python sim_collect_piper.py --num_episodes 30 --overwrite --controller keyboard
+```
+
+**手柄按键**：
+
+| 手柄 | 作用 |
+|---|---|
+| 左摇杆 前后/左右 | 末端水平移动（x/y） |
+| 右摇杆 上下 | 末端升降（z） |
+| A 键 | 夹爪开合切换 |
+| B 键 | **丢弃本条**（失败数据不保存） |
+| Start | 下一条 episode |
+| Select | 退出 |
+
+**键盘按键**：`w/s` 前后、`a/d` 左右、`r/f` 升降、`g` 夹爪、`x` 丢弃、`n` 下一条、`q` 退出
+
+> 采集要点：
+> - 每条 = 一次完整的「靠近方块 → 夹爪闭合 → 抬起来」，别塞多个动作
+> - 抓失败了按 **B（或 x）** 当场丢弃，别留废数据
+> - `--num_episodes 30` 是"采满 30 条**好数据**"（丢弃的不占名额）
+
+### 第 2 步：训练 ACT
+
+```bash
+bash train_piper.sh 2000      # 先 2000 步快速验证（约 1 分钟）
+bash train_piper.sh 20000     # 正式训练（约 9 分钟）
+```
+
+- 训练时会**实时打印 loss**，并自动保存日志到 `~/lerobot_outputs/act_piper_keyboard.log`
+- 同时开启 **W&B** 实时曲线（浏览器打开终端里的 `Track this run` 链接）
+- 找不到 W&B 链接时：`grep "Track this run" ~/lerobot_outputs/act_piper_keyboard.log`
+
+### 第 3 步：部署推理（带图形界面）
+
+```bash
+bash rollout_piper.sh
+```
+
+会弹**两个窗口**：
+1. **MuJoCo 原生 viewer**：自由视角看机械臂（鼠标旋转/缩放）
+2. **"Top Camera (policy view)"**：顶部相机俯拍图 = 策略"眼睛"看到的观测
+
+终端打印每条「方块最高高度」，**>0.16 米 = 抓起来了**。
+
+### 第 4 步：画 loss 曲线
+
+```bash
+python plot_training.py ~/lerobot_outputs/act_piper_keyboard.log
+# → 生成 *_curves.png（loss / l1_loss / kld_loss / lr 四张图）
+```
+
+---
+
+## 三、关键指标怎么读
+
+| 指标 | 含义 | 健康表现 |
+|---|---|---|
+| **l1_loss** | 动作重建误差（**最重要**） | 持续下降，收敛到 0.1 左右 |
+| loss | 总损失 | 下降 |
+| kld_loss | VAE KL 散度 | 先降后稳 |
+| grdn | 梯度范数 | 稳定，不爆 NaN |
+| mem_gb | 显存 | 稳定，不 OOM |
+
+> **最终标准是 rollout 成功率，不是 loss 本身。** loss 降了但抓不起来 = 数据质量问题。
+
+---
+
+## 四、版本管理（git）
+
+已用 git 管理，关键节点打了 tag：
+
+```bash
+git log --oneline      # 看历史
+git tag                # 看标签
+
+# 回退到某个版本
+git reset --hard <commit或tag>
+```
+
+| 标签 | 内容 |
+|---|---|
+| v1-baseline | 纯位置 IK 遥操 |
+| v2-yaw-test | 位置 + LT/RT 偏航（测试过，不好用已回退） |
+| v1.1-no-marker | 隐藏遥操绿球 |
+
+---
+
+## 五、常见问题
+
+- **训练报 `Output directory already exists`** → 脚本已处理（`rm -rf` 输出目录），若手动跑 `lerobot-train` 记得换 `--output_dir`
+- **训练报 `cublasLtCreate`** → 脚本已自动清 `LD_LIBRARY_PATH`，手动跑要 `env -u LD_LIBRARY_PATH`
+- **huggingface 报 proxy/socks 错误** → 已装 `socksio` + 脚本自动清代理变量
+- **rollout 末尾"段错误"** → 结果已全部打印，是 mujoco GL 退出清理的崩溃，不影响结果
+- **采集时夹爪惯性带歪手臂** → 已改斜坡开合（15 帧渐变）
+- **采集画面里绿球污染观测** → 已在渲染观测图时隐藏（`v1.1-no-marker` 起生效）
+
+---
+
+## 六、目录说明
 
 | 文件 | 作用 |
 |---|---|
-| `config.env` | 全局配置（CAN、相机、遥操作设备、数据集、训练参数），**先改这里** |
-| `00_check_env.sh` | 环境自检（只读，跑一遍看缺什么） |
-| `01_setup_can.sh` | 配置并激活 Piper 的 CAN 总线（需 sudo） |
-| `02_install_env.sh` | 一键安装 miniforge + conda 环境 + PyTorch(cu128) + LeRobot + Piper 插件 |
-| `03_test_piper.py` | 只读测试：验证 CAN + piper_sdk 通信是否正常 |
-| `04_record.sh` | 遥操作采集抓取示范数据集 |
-| `05_train_act.sh` | 训练 ACT 策略（5060 优化） |
-| `06_deploy.sh` | 部署策略，让 Piper 自主抓取 |
+| `sim_collect_piper.py` | 手柄/键盘遥操作采集数据 |
+| `train_piper.sh` | 训练 ACT（含日志 + W&B） |
+| `rollout_piper.sh` | 部署推理（图形界面 + 相机视角） |
+| `sim_rollout_piper.py` | rollout 核心逻辑（手动归一化加载 ACT） |
+| `piper_sim.py` | Piper MuJoCo 仿真环境（含 IK、相机、绿球标记） |
+| `plot_training.py` | 画 loss 曲线 |
+| `sim_demo.sh` | 纯仿真冒烟（pusht/aloha/libero，验证 LeRobot 通用链路） |
+| `assets/piper/` | DeepMind 官方 `agilex_piper` MJCF 模型 |
+| `00~06_*.sh`、`config.env`、`common.sh` | 真机 LeRobot 脚本（CAN + piper_sdk，真机阶段用） |
 
-## 前置条件
+---
 
-- **机械臂**：AgileX Piper + 原厂 USB-CAN 模块 + 末端夹爪
-- **相机**：一个 USB 相机（对着工作台/腕部）
-- **遥操作设备（三选一）**：SO-101 主臂 / SpaceMouse / PiperMate 主臂（见第 5 节）
-- **系统**：Ubuntu 22.04 / 24.04，x86_64
-- **显卡**：RTX 5060（Blackwell），NVIDIA 驱动 **≥ 570**（建议升到最新 580+）
+## 七、当前成果
 
-## 快速开始（按顺序执行）
+- **20000 步 ACT 策略，sim2sim 抓取成功率 5/5（100%）**，方块稳定抬到 0.29~0.40 米
+- loss 10.61 → 0.152，l1_loss 0.65 → 0.116
 
-```bash
-cd /home/mage/piper_ws/lerobot_setup
-chmod +x *.sh
-
-# 1) 先看环境缺什么
-bash 00_check_env.sh
-
-# 2) 激活 CAN（机械臂上电 + USB-CAN 插好）
-bash 01_setup_can.sh
-
-# 3) 安装整套环境（首次约 10~20 分钟）
-bash 02_install_env.sh
-
-# 4) 验证机械臂 CAN 通信
-python 03_test_piper.py
-
-# 5) 采集抓取示范数据（先 50 条）
-bash 04_record.sh
-
-# 6) 训练 ACT
-bash 05_train_act.sh
-
-# 7) 部署抓取（先改 config.env 的 POLICY_PATH）
-bash 06_deploy.sh
-```
-
-> 每次开新终端都要先激活环境：`conda activate lerobot`
-
-## 1. 改配置
-
-打开 `config.env`，按实际改这几项：
-
-- `CAMERA_JSON`：相机索引 `index_or_path`（多相机用 `ls /dev/video*` 确认）
-- `TELEOP_TYPE` / `TELEOP_ARGS`：你的遥操作设备（见第 5 节）
-- `TASK_DESCRIPTION`：写清楚要抓什么，例如 `"grab the red cube and place it into the box"`
-- `NUM_EPISODES`：先 `50`，流程跑通后再加到 100+
-
-## 2. CAN 总线说明
-
-Piper 通过 **CAN 总线**（1 Mbps）通信，AgileX USB-CAN 模块插上后是 `can0`。
-`01_setup_can.sh` 会自动：装 `can-utils/ethtool/iproute2` → 找到 CAN 接口 → 统一改名 `can0` → 设 1 Mbps → 激活。
-
-> **每次重启电脑、重插 USB-CAN 后，都要重新运行 `bash 01_setup_can.sh`。**
-
-## 3. 训练显存优化（5060 8GB）
-
-`05_train_act.sh` 已按 8GB 优化（`batch_size=4`）。如果训练时 OOM（显存不足）：
-
-1. 把 `BATCH_SIZE` 降到 `2`
-2. 把 `CAMERA_JSON` 分辨率降到 `320x240`
-3. 训练时关掉浏览器/游戏等占用显存的程序，用 `nvidia-smi` 或 `nvitop` 盯着
-
-ACT 在 5060 上抓取任务通常 **30 分钟 ~ 2 小时** 出结果。想跑 Diffusion/VLA 才需要租 4090。
-
-## 4. 训练步数怎么定
-
-`STEPS` ≈ `epochs × (总帧数 / batch)`。
-
-- 50 条 × 45s × 30fps ≈ 6.75 万帧，batch=4 时 1 epoch ≈ 1.7 万步，10 epoch ≈ 17 万步。
-- 小数据集建议先 `STEPS=50000` 看抓取效果，效果不够再逐步加。
-
-## 5. 遥操作设备选择
-
-采集示范数据需要“主臂”来拖动/操控 Piper。三选一，改 `config.env`：
-
-| 设备 | TELEOP_TYPE | 说明 |
-|---|---|---|
-| **SO-101 主臂**（推荐，最常见） | `so101_leader` | LeRobot 原生支持，`pip install 'lerobot[feetech]'` |
-| **SpaceMouse** | `spacemouse` | 需 `pip install lerobot-teleoperator-spacemouse` |
-| **PiperMate 主臂** | `pipermate` | 需 FashionStar 插件 `pip install lerobot-teleoperator-pipermate` |
-
-如果没有主臂，最省事的是买/借一个 SO-101 主臂，或用 SpaceMouse 做笛卡尔遥操作。
-
-## 6. 部署时找不到策略？
-
-训练结束后检查点在 `$OUTPUT_DIR/$JOB_NAME/checkpoints/` 下（通常有 `last/pretrained_model` 或按 step 数字命名的目录）。用 `ls` 看一眼，把 `config.env` 的 `POLICY_PATH` 指过去即可。
-
-## 常见问题
-
-- **`no kernel image is available for sm_120`** → 驱动太老，升级到 570+ 后重装 cu128 PyTorch。
-- **报某参数不存在** → 各版本 CLI 参数可能略有差异，运行 `lerobot-record --help` / `lerobot-train --help` 对照调整。
-- **采集时机械臂不动** → 检查 `bash 01_setup_can.sh` 是否成功、`candump can0` 是否有数据、机械臂是否已上电且不是“主臂模式”。
-- **数据采集后训练找不到数据集** → 确认 `04` 和 `05` 的 `DATASET_ROOT` / `DATASET_REPO_ID` 一致。
-
-## 参考
-
-- [LeRobot 官方仓库](https://github.com/huggingface/lerobot)
-- [LeRobot 安装文档](https://huggingface.co/docs/lerobot/installation)
-- [LeRobot Compute 硬件指南](https://huggingface.co/docs/lerobot/hardware_guide)
-- [Piper 插件 lerobot_robot_piper (AgRobotics)](https://github.com/AgRoboticsResearch/lerobot_robot_piper)
-- [AgileX piper_sdk](https://github.com/agilexrobotics/piper_sdk) / [piper_sdk_demo（含 CAN 配置）](https://github.com/agilexrobotics/piper_sdk_demo)
+**下一步方向**（二选一）：
+1. 加数据多样性（方块随机位置/朝向）再训，测泛化能力
+2. 回真机：把 `piper_sim.py` 换成 `piper_sdk` + CAN，遥操换成拖拽示教
