@@ -24,7 +24,9 @@ lerobot-train \
   --log_freq=100 \
   --output_dir="$OUT" \
   --job_name=act_piper \
-  --wandb.enable=false \
+  --wandb.enable=true \
+  --wandb.mode=online \
+  --wandb.project=piper_grasp \
   --policy.push_to_hub=false 2>&1 | tee "$OUT/train.log"
 
 info "训练完成 ✓ 检查点: $OUT/checkpoints/last/pretrained_model"
