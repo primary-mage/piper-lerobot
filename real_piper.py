@@ -138,9 +138,12 @@ class RealPiperEnv:
 
     def close(self):
         try:
-            self.piper.GripperCtrl(0, 1000, 0x00, 0)  # 失能夹爪（DisablePiper 只管 6 个手臂关节）
-            self.piper.DisablePiper()
+            self.piper.GripperCtrl(0, 1000, 0x00, 0)  # 失能夹爪
+            # 进入拖动示教悬停（重力补偿+阻尼），不断电，避免退出时手臂砸落
+            self.piper.MotionCtrl_1(0x00, 0x00, 0x01)
+            time.sleep(0.2)
             self.piper.DisconnectPort()
+            print("[提示] 手臂已进入拖动示教悬停（重力补偿），可手推调整或断电")
         except Exception:
             pass
         if self.pipeline is not None:
