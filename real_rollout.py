@@ -91,6 +91,7 @@ def main():
     ap.add_argument("--fps", type=int, default=10, help="策略推理频率（与训练 fps 一致）")
     ap.add_argument("--ctrl_fps", type=int, default=50, help="动作发送频率（插值），越高越平滑")
     ap.add_argument("--move_spd_rate", type=int, default=30)
+    ap.add_argument("--action_smooth", type=float, default=0.5, help="策略动作EMA平滑系数0~1(1=不平滑)")
     ap.add_argument("--debug_log", default=None)
     ap.add_argument("--no_confirm", action="store_true")
     args = ap.parse_args()
@@ -126,6 +127,7 @@ def main():
     episodes_done = 0
     step = 0
     prev_action = None
+    prev_smooth = None
 
     try:
         while not ui["quit"] and not ui["stop"]:
@@ -143,6 +145,7 @@ def main():
                         break
                     policy.reset()
                     prev_action = None
+                    prev_smooth = None
                     step = 0
                     mode = "recording"
                     print("开始策略推理...")
@@ -186,16 +189,23 @@ def main():
             if debug_w is not None:
                 debug_w.writerow([episodes_done, step, *np.round(qpos, 4), *np.round(action_np, 4)])
 
+            # EMA 平滑策略输出（抑制策略抖动）
+            if prev_smooth is None:
+                smooth_a = action_np
+            else:
+                smooth_a = args.action_smooth * action_np + (1.0 - args.action_smooth) * prev_smooth
+            prev_smooth = smooth_a
+
             # 50Hz 插值发送
-            a_prev = action_np if prev_action is None else prev_action
+            a_prev = smooth_a if prev_action is None else prev_action
             for k in range(sub):
                 if ui["stop"] or ui["quit"]:
                     break
                 alpha = (k + 1) / sub
-                interp = (1.0 - alpha) * a_prev + alpha * action_np
+                interp = (1.0 - alpha) * a_prev + alpha * smooth_a
                 env.send_action(interp)
                 time.sleep(1.0 / args.ctrl_fps)
-            prev_action = action_np
+            prev_action = smooth_a
             step += 1
 
         if ui["stop"]:
