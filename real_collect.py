@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--pos_delta", type=float, default=0.01, help="键盘每步末端移动量(米)")
     ap.add_argument("--controller", choices=["keyboard", "gamepad"], default="keyboard")
     ap.add_argument("--overwrite", action="store_true", help="覆盖旧数据（会先备份）")
+    ap.add_argument("--move_spd_rate", type=int, default=40, help="运动速度百分比 0~100，越低越平滑（默认 40）")
     args = ap.parse_args()
 
     if args.overwrite:
@@ -45,7 +46,7 @@ def main():
             shutil.move(ds_dir, backup)
             print(f"[提示] 旧数据集已备份（未删除）→ {backup}")
 
-    env = RealPiperEnv(can_interface=args.can_interface, image_size=96)
+    env = RealPiperEnv(can_interface=args.can_interface, image_size=96, move_spd_rate=args.move_spd_rate)
     ds = LeRobotDataset.create(
         repo_id=args.repo_id, fps=args.fps,
         features=build_features(), use_videos=True,

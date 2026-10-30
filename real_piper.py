@@ -36,10 +36,11 @@ GRIPPER_MAX_INT = 100000  # 夹爪满开编码器值（物理约 100mm）；0=�
 class RealPiperEnv:
     """真机 Piper 环境。接口与 PiperEnv 对齐，供采集/部署脚本调用。"""
 
-    def __init__(self, can_interface="can0", image_size=96, enable_arm=True, use_depth=False):
+    def __init__(self, can_interface="can0", image_size=96, enable_arm=True, use_depth=False, move_spd_rate=40):
         self.can_interface = can_interface
         self.image_size = image_size
         self.use_depth = use_depth
+        self.move_spd_rate = move_spd_rate  # 运动速度百分比 0~100，越低越平滑（默认 40）
 
         # 1. 真机连接（piper_sdk V2 协议）
         if C_PiperInterface_V2 is None:
@@ -97,7 +98,7 @@ class RealPiperEnv:
         """发 7 维目标：6 手臂关节(rad) + 夹爪(0~1)。"""
         action = np.asarray(action, dtype=np.float64)
         arm_int = [int(round(a * JOINT_RAD_TO_INT)) for a in action[:6]]
-        self.piper.MotionCtrl_2(0x01, 0x01, 100, 0x00)  # CAN 控制 + MOVE J 关节模式
+        self.piper.MotionCtrl_2(0x01, 0x01, self.move_spd_rate, 0x00)  # CAN 控制 + MOVE J，速度可调
         self.piper.JointCtrl(*arm_int)
         gripper_int = int(round((1.0 - action[6] / 0.035) * GRIPPER_MAX_INT))  # 0=开(满开) 0.035=闭(0)
         self.piper.GripperCtrl(gripper_int, 1000, 0x01, 0)
