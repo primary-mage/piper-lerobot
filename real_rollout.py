@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """真机 ACT 策略部署：加载训练好的 ACT，读真机关节角 + D435i 相机，输出动作发真机。
 
-UI（鼠标点击）：
-  [EMERGENCY STOP]  立即中止整个部署（手臂进入拖动示教悬停）
-  [NORMAL END]      结束当前这一轮，进入下一轮（或结束全部）
+UI：[EMERGENCY STOP] 立即中止；[NORMAL END] 结束当前轮。
 
-用法：
-  bash real_rollout.sh [检查点] [--num_episodes 3] [--max_steps 400]
+抖动修复：策略按 fps(10Hz) 推理，但动作按 ctrl_fps(50Hz) 线性插值发送，
+避免 10Hz 台阶导致手臂顿挫（与遥操 50Hz 同理）。
 
-安全：每轮先复位 home、低速、开始前回车确认。
+用法：bash real_rollout.sh [检查点] [--num_episodes 3] [--debug_log /tmp/roll.csv]
 """
 import argparse
 import time
@@ -37,7 +35,6 @@ def load_stats(checkpoint: str) -> dict:
     post = st.load_file(f"{checkpoint}/policy_postprocessor_step_0_unnormalizer_processor.safetensors")
     state_std = pre["observation.state.std"].numpy().copy()
     action_std = post["action.std"].numpy().copy()
-    # 防护：std=0 的维度（采集时从没动过的关节）除以 0 会产生 NaN
     state_std = np.where(np.abs(state_std) < 1e-8, 1.0, state_std)
     action_std = np.where(np.abs(action_std) < 1e-8, 0.0, action_std)
     return {
@@ -64,7 +61,6 @@ def draw_ui(img_rgb, ep, num_ep, step, max_steps):
 
 
 def move_to_home(env, ui, ctrl_fps=30, duration=2.5):
-    """平滑复位到 home 姿态（期间响应紧急停止）。"""
     q_cur = env.get_qpos()
     q_start = q_cur[:6].copy()
     grip = float(q_cur[6])
@@ -84,8 +80,10 @@ def main():
     ap.add_argument("--num_episodes", type=int, default=3)
     ap.add_argument("--max_steps", type=int, default=400)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--fps", type=int, default=10)
-    ap.add_argument("--move_spd_rate", type=int, default=30, help="运动速度百分比，越低越安全")
+    ap.add_argument("--fps", type=int, default=10, help="策略推理频率（与训练 fps 一致）")
+    ap.add_argument("--ctrl_fps", type=int, default=50, help="动作发送频率（插值），越高越平滑")
+    ap.add_argument("--move_spd_rate", type=int, default=30)
+    ap.add_argument("--debug_log", default=None, help="调试日志 CSV 路径")
     ap.add_argument("--no_confirm", action="store_true")
     args = ap.parse_args()
 
@@ -93,7 +91,7 @@ def main():
     stats = load_stats(args.checkpoint)
     env = RealPiperEnv(can_interface="can0", image_size=96, move_spd_rate=args.move_spd_rate)
 
-    print("[安全提示] 真机策略即将开始运动！请确保手臂周围无障碍物、随时可断电。")
+    print("[安全提示] 真机策略即将开始运动！确保周围无障碍、随时可断电。")
     if not args.no_confirm:
         input("按回车开始，Ctrl+C 取消...")
 
@@ -108,6 +106,16 @@ def main():
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(WIN, on_mouse)
 
+    debug_f, debug_w = None, None
+    if args.debug_log:
+        import csv
+        debug_f = open(args.debug_log, "w", newline="")
+        debug_w = csv.writer(debug_f)
+        debug_w.writerow(["step", "ep"] + [f"q{i}" for i in range(7)] + [f"a{i}" for i in range(7)])
+
+    sub = max(1, args.ctrl_fps // args.fps)  # 每个策略步插值成 sub 个控制帧
+    prev_action = None
+
     try:
         for ep in range(args.num_episodes):
             if ui["stop"]:
@@ -117,6 +125,7 @@ def main():
             move_to_home(env, ui)
             if ui["stop"]:
                 break
+            prev_action = None
             print("已复位到 home，开始策略推理...")
             for t in range(args.max_steps):
                 if ui["stop"]:
@@ -127,7 +136,6 @@ def main():
                     break
 
                 qpos = env.get_qpos()
-                # 与采集一致：先 480x360 (4:3) 再缩到 96x96
                 img480 = env.render_image(480, keep_aspect=True)
                 img = cv2.resize(img480, (96, 96))
                 cv2.imshow(WIN, draw_ui(img480, ep + 1, args.num_episodes, t, args.max_steps))
@@ -145,14 +153,29 @@ def main():
                 with torch.inference_mode():
                     action = policy.select_action(batch)
                 action = action * torch.from_numpy(stats["action_std"]).to(args.device) + torch.from_numpy(stats["action_mean"]).to(args.device)
-                env.send_action(action[0].cpu().numpy().astype(np.float32))
-                time.sleep(1.0 / args.fps)
+                action_np = action[0].cpu().numpy().astype(np.float32)
+
+                if debug_w is not None:
+                    debug_w.writerow([t, ep, *np.round(qpos, 4), *np.round(action_np, 4)])
+
+                # 动作按 ctrl_fps 插值发送（消除 10Hz 台阶顿挫）
+                a_prev = action_np if prev_action is None else prev_action
+                for k in range(sub):
+                    if ui["stop"]:
+                        break
+                    alpha = (k + 1) / sub
+                    interp = (1.0 - alpha) * a_prev + alpha * action_np
+                    env.send_action(interp)
+                    time.sleep(1.0 / args.ctrl_fps)
+                prev_action = action_np
             print(f"第 {ep+1} 轮结束")
         if ui["stop"]:
             print("\n[紧急停止] 部署已中止")
     except KeyboardInterrupt:
         print("\n[中断] 用户 Ctrl+C")
     finally:
+        if debug_f is not None:
+            debug_f.close()
         try:
             cv2.destroyAllWindows()
         except Exception:
