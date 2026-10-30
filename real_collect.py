@@ -32,7 +32,8 @@ def main():
     ap.add_argument("--can_interface", default="can0", help="CAN 接口名（先 bash 01_setup_can.sh 激活）")
     ap.add_argument("--num_episodes", type=int, default=30)
     ap.add_argument("--max_steps", type=int, default=400)
-    ap.add_argument("--fps", type=int, default=10)
+    ap.add_argument("--fps", type=int, default=10, help="数据记录帧率（数据集 fps）")
+    ap.add_argument("--ctrl_fps", type=int, default=50, help="控制环频率，高于 fps 时目标连续更新、消除顿挫")
     ap.add_argument("--pos_delta", type=float, default=0.01, help="键盘每步末端移动量(米)")
     ap.add_argument("--controller", choices=["keyboard", "gamepad"], default="keyboard")
     ap.add_argument("--overwrite", action="store_true", help="覆盖旧数据（会先备份）")
@@ -132,8 +133,12 @@ def main():
             ep_done = False
             discard = False
             step = 0
+            ctrl_fps = args.ctrl_fps
+            record_every = max(1, ctrl_fps // args.fps)  # 每 N 个控制帧记录 1 帧（10Hz）
+            ctrl_step = 0
 
             while not ep_done and step < args.max_steps and not state["quit"]:
+                ctrl_step += 1
                 # 控制器 → 目标末端位置
                 if args.controller == "gamepad":
                     st = state["stick"]
@@ -178,24 +183,30 @@ def main():
                 if debug_w is not None:
                     debug_w.writerow([step, *np.round(target_pos, 4), *np.round(arm_q, 4), *np.round(arm_q_s, 4), round(float(gripper), 4)])
 
-                if step % 50 == 0:
-                    print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} 夹爪={'合' if gripper > 0.02 else '开'}")
+                # 调试日志（用控制帧计数）
+                if debug_w is not None:
+                    debug_w.writerow([ctrl_step, *np.round(target_pos, 4), *np.round(arm_q, 4), *np.round(arm_q_s, 4), round(float(gripper), 4)])
 
-                img = env.render_image(96)  # 数据集用 96×96
-                ep_frames.append({
-                    "observation.image": img,
-                    "observation.state": qpos,
-                    "action": action,
-                    "next.reward": np.array([0.0], dtype=np.float32),  # 真机无地面真值
-                    "next.done": np.array([False]),
-                    "next.success": np.array([False]),
-                    "task": "grasp the object and lift it",
-                })
-
-                env.send_action(action)  # 发真机
-                time.sleep(1.0 / args.fps)
+                # 发真机（每控制帧，50Hz）
+                env.send_action(action)
+                time.sleep(1.0 / ctrl_fps)
                 qpos = env.get_qpos()  # 读回新关节角
-                step += 1
+
+                # 每 record_every 个控制帧记录 1 帧数据（10Hz，数据集格式不变）
+                if ctrl_step % record_every == 0:
+                    if step % 50 == 0:
+                        print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} 夹爪={'合' if gripper > 0.02 else '开'}")
+                    img = env.render_image(96)  # 数据集用 96×96
+                    ep_frames.append({
+                        "observation.image": img,
+                        "observation.state": qpos,
+                        "action": action,
+                        "next.reward": np.array([0.0], dtype=np.float32),  # 真机无地面真值
+                        "next.done": np.array([False]),
+                        "next.success": np.array([False]),
+                        "task": "grasp the object and lift it",
+                    })
+                    step += 1
 
                 if state["discard_episode"]:
                     discard = True
