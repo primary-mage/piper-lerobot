@@ -132,7 +132,7 @@ class RealPiperEnv:
         img = np.asanyarray(color.get_data())  # BGR
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         size = size or self.image_size
-        if img.shape[0] != size:
+        if img.shape[0] != size or img.shape[1] != size:
             img = cv2.resize(img, (size, size))
         return img
 
