@@ -30,6 +30,7 @@ JOINT_INT_TO_RAD = 0.001 * DEG_TO_RAD   # 读：int → rad
 JOINT_RAD_TO_INT = 1.0 / JOINT_INT_TO_RAD  # 发：rad → int
 
 ARM_JOINT_ATTRS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+GRIPPER_MAX_INT = 100000  # 夹爪满开编码器值（物理约 100mm）；0=闭合
 
 
 class RealPiperEnv:
@@ -88,8 +89,8 @@ class RealPiperEnv:
     def _read_gripper(self):
         """读夹爪，映射到仿真约定：0=张开，0.035=闭合。"""
         g = self.piper.GetArmGripperMsgs().gripper_state
-        mm = g.grippers_angle / 1000.0  # 0.001mm → mm（量程 0~70mm）
-        return 0.035 * (1.0 - mm / 70.0)  # 70mm 开→0，0mm 闭→0.035
+        raw = g.grippers_angle  # 编码器值：0=闭合，GRIPPER_MAX_INT=满开
+        return 0.035 * (1.0 - raw / GRIPPER_MAX_INT)  # 满开→0，闭合→0.035
 
     # ---- 真机发关节指令 ----
     def send_action(self, action):
@@ -98,7 +99,7 @@ class RealPiperEnv:
         arm_int = [int(round(a * JOINT_RAD_TO_INT)) for a in action[:6]]
         self.piper.MotionCtrl_2(0x01, 0x01, 100, 0x00)  # CAN 控制 + MOVE J 关节模式
         self.piper.JointCtrl(*arm_int)
-        gripper_int = int(round((1.0 - action[6] / 0.035) * 70.0 * 1000))  # 仿真约定 0=开(70mm) 0.035=闭(0mm)
+        gripper_int = int(round((1.0 - action[6] / 0.035) * GRIPPER_MAX_INT))  # 0=开(满开) 0.035=闭(0)
         self.piper.GripperCtrl(gripper_int, 1000, 0x01, 0)
 
     # ---- 数字孪生：把真机关节角同步进 MuJoCo 模型，再算夹爪中点/IK ----
