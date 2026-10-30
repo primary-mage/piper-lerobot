@@ -29,16 +29,17 @@ from sim_collect_piper import build_features, stick_to_delta, GRIPPER_RAMP_STEPS
 HOME_QPOS_REAL = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0], dtype=np.float32)
 
 WIN = "Piper Teleop (Camera + Control)"
-IMG = 480
+IMG_W = 480   # 预览宽度（保持 4:3）
+IMG_H = 360   # 预览高度
 BAR = 90
 
 # 按钮区域 (x, y, w, h)
 BUTTONS = {
-    "start":   (5, IMG + 10, 90, 70),
-    "end":     (100, IMG + 10, 90, 70),
-    "home":    (195, IMG + 10, 90, 70),
-    "discard": (290, IMG + 10, 90, 70),
-    "quit":    (385, IMG + 10, 90, 70),
+    "start":   (5, IMG_H + 10, 90, 70),
+    "end":     (100, IMG_H + 10, 90, 70),
+    "home":    (195, IMG_H + 10, 90, 70),
+    "discard": (290, IMG_H + 10, 90, 70),
+    "quit":    (385, IMG_H + 10, 90, 70),
 }
 LABELS = {"start": "START", "end": "END", "home": "HOME", "discard": "DISCARD", "quit": "QUIT"}
 
@@ -97,8 +98,8 @@ def do_teleop(env, args, state, tel):
 
 def draw_ui(img_rgb, mode, saved, total):
     """把相机图 + 按钮栏拼成显示图（BGR）。"""
-    canvas = np.zeros((IMG + BAR, IMG, 3), dtype=np.uint8)
-    canvas[:IMG] = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    canvas = np.zeros((IMG_H + BAR, IMG_W, 3), dtype=np.uint8)
+    canvas[:IMG_H] = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
     cv2.putText(canvas, f"MODE: {mode}   SAVED: {saved}/{total}", (10, 24),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     for name, (x, y, w, h) in BUTTONS.items():
@@ -215,7 +216,7 @@ def main():
             ctrl_step += 1
 
             if ctrl_step % 3 == 0 or img_cache is None:
-                img_cache = env.render_image(IMG)
+                img_cache = env.render_image(IMG_W, keep_aspect=True)
                 cv2.imshow(WIN, draw_ui(img_cache, mode, saved, args.num_episodes))
                 cv2.waitKey(1)
 
@@ -242,7 +243,7 @@ def main():
             if mode == "recording":
                 if ctrl_step % record_every == 0:
                     if img_cache is None:
-                        img_cache = env.render_image(IMG)
+                        img_cache = env.render_image(IMG_W, keep_aspect=True)
                     img96 = cv2.resize(img_cache, (96, 96))
                     ep_frames.append({
                         "observation.image": img96,

@@ -123,8 +123,12 @@ class RealPiperEnv:
         return self.twin.solve_ik(target_pos)
 
     # ---- 相机 ----
-    def render_image(self, size=None):
-        """从 D435i 读 RGB 图（BGR→RGB，resize 到 size）。"""
+    def render_image(self, size=None, keep_aspect=False):
+        """从 D435i 读 RGB 图（BGR→RGB）。
+
+        keep_aspect=True 时保持原始宽高比（宽度=size，高度按比例），用于预览显示；
+        否则缩放到 size×size 正方形（数据集用）。
+        """
         if self.pipeline is None:
             raise RuntimeError("D435i 相机未初始化")
         frames = self.pipeline.wait_for_frames()
@@ -132,8 +136,13 @@ class RealPiperEnv:
         img = np.asanyarray(color.get_data())  # BGR
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         size = size or self.image_size
-        if img.shape[0] != size or img.shape[1] != size:
-            img = cv2.resize(img, (size, size))
+        if keep_aspect:
+            scale = size / img.shape[1]
+            new_w, new_h = size, max(1, int(round(img.shape[0] * scale)))
+        else:
+            new_w, new_h = size, size
+        if (img.shape[1], img.shape[0]) != (new_w, new_h):
+            img = cv2.resize(img, (new_w, new_h))
         return img
 
     def close(self):
