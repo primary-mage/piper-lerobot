@@ -157,13 +157,17 @@ class PiperEnv:
         """移动绿色目标标记球到 pos。"""
         self.data.mocap_pos[self.target_mocap_id] = pos
 
-    def solve_ik(self, target_pos, max_iter=60, tol=1e-3, damping=1e-6):
-        """阻尼最小二乘 IK：求使夹爪参考点（两指中点）到达 target_pos 的 6 个手臂关节角。
+    def solve_ik(self, target_pos, max_iter=60, tol=1e-3, damping=1e-6, null_gain=0.2):
+        """阻尼最小二乘 IK + 零空间镇定：求使夹爪中点到达 target_pos 的 6 个手臂关节角。
+
+        零空间镇定：6 关节解 3 维位置是冗余的，DLS 会在冗余自由度间漂移导致关节抖动。
+        加一项"拉向当前关节姿态"的零空间任务，让 IK 优先保持关节不动（消抖）。
 
         不改动真实物理状态（迭代用临时 qpos，结束后恢复）。
         """
         orig = np.array([self.data.qpos[i] for i in self.arm_qpos_ids])
         qpos = orig.copy()
+        q_pref = orig.copy()  # 偏好配置 = 当前关节角（零空间拉向这里）
         jacp7 = np.zeros((3, self.model.nv))
         jacr7 = np.zeros((3, self.model.nv))
         jacp8 = np.zeros((3, self.model.nv))
@@ -180,9 +184,14 @@ class PiperEnv:
             mujoco.mj_jacBody(self.model, self.data, jacp7, jacr7, self.grasp_body_id7)
             mujoco.mj_jacBody(self.model, self.data, jacp8, jacr8, self.grasp_body_id8)
             J = (jacp7[:, :6] + jacp8[:, :6]) / 2.0  # 中点位置雅可比（6 个手臂关节）
+            # 主任务：DLS 到达目标
             A = J @ J.T + damping * np.eye(3)
-            dq = J.T @ np.linalg.solve(A, err)
-            qpos += dq
+            dq_task = J.T @ np.linalg.solve(A, err)
+            # 零空间任务：拉向偏好配置（保持关节不动，消除冗余漂移）
+            J_pinv = J.T @ np.linalg.inv(J @ J.T + damping * np.eye(3))  # (6,3) 伪逆
+            N = np.eye(6) - J_pinv @ J  # (6,6) 零空间投影
+            dq_null = null_gain * (N @ (q_pref - qpos))
+            qpos += dq_task + dq_null
             for i in range(6):
                 lo, hi = ARM_LIMITS[i]
                 qpos[i] = float(np.clip(qpos[i], lo, hi))
