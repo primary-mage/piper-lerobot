@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""真机 Piper 手柄/键盘遥操作采集 LeRobot 数据集（笛卡尔 IK 控制）。
+"""真机 Piper 遥操作采集 LeRobot 数据集（笛卡尔 IK + cv2 控制面板 UI）。
 
-流程：
-  每轮开始 → 自动复位到 home 姿态 → 摆好道具（可自由遥控，不记录）
-  → 按 Y（再次复位，确保起点一致）→ 开始录制 → 抓取
-  → Start=结束并保存 / B=丢弃本条 / Select=退出（示教悬停）
+UI（鼠标点击）：
+  [START]   复位到 home → 开始录制（每轮起点一致）
+  [END]     保存本条 → 回到录制空闲
+  [HOME]    手臂回 home（随时可用）
+  [DISCARD] 丢弃本条 → 回到录制空闲
+  [QUIT]    退出（示教悬停）
 
-手柄：左摇杆=前后左右 右摇杆上下=升降 A=夹爪 B=丢弃 Y=开始录制 Start=结束并保存 Select=退出
-键盘：w/s 前后 a/d 左右 r/f 升降 g 夹爪 y 开始录制 n 结束并保存 x 丢弃 q 退出
+手柄：A=夹爪 B=丢弃。键盘：g 夹爪 q 退出。
+流程：空闲（可自由遥控不记录）↔ 录制中
 """
 import argparse
 import os
@@ -23,12 +25,26 @@ from real_piper import RealPiperEnv
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from sim_collect_piper import build_features, stick_to_delta, GRIPPER_RAMP_STEPS
 
-# 真机 home 姿态（6 关节角，弧度）。先用仿真的 home，实测后可微调
+# 真机 home 姿态（6 关节角，弧度）
 HOME_QPOS_REAL = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0], dtype=np.float32)
+
+WIN = "Piper Teleop (Camera + Control)"
+IMG = 480
+BAR = 90
+
+# 按钮区域 (x, y, w, h)
+BUTTONS = {
+    "start":   (5, IMG + 10, 90, 70),
+    "end":     (100, IMG + 10, 90, 70),
+    "home":    (195, IMG + 10, 90, 70),
+    "discard": (290, IMG + 10, 90, 70),
+    "quit":    (385, IMG + 10, 90, 70),
+}
+LABELS = {"start": "START", "end": "END", "home": "HOME", "discard": "DISCARD", "quit": "QUIT"}
 
 
 def smooth_move_to_home(env, ctrl_fps, duration=2.5):
-    """平滑移动到 home 姿态（关节空间线性插值）。"""
+    """平滑移动到 home 姿态。"""
     q_cur = env.get_qpos()
     q_start = q_cur[:6].copy()
     grip = float(q_cur[6])
@@ -41,7 +57,7 @@ def smooth_move_to_home(env, ctrl_fps, duration=2.5):
 
 
 def do_teleop(env, args, state, tel):
-    """一步遥操：更新目标位置、解 IK、发指令。tel = {"target","gripper","gripper_goal"}。"""
+    """一步遥操：更新目标、解 IK、发指令。"""
     if args.controller == "gamepad":
         st = state["stick"]
         sc = args.stick_scale
@@ -72,7 +88,6 @@ def do_teleop(env, args, state, tel):
         tel["gripper"] = min(tel["gripper"] + ramp, tel["gripper_goal"])
     elif tel["gripper"] > tel["gripper_goal"]:
         tel["gripper"] = max(tel["gripper"] - ramp, tel["gripper_goal"])
-    # IK + 发指令
     arm_q = env.solve_ik(tel["target"])
     action = np.concatenate([arm_q, [tel["gripper"]]]).astype(np.float32)
     env.send_action(action)
@@ -80,20 +95,35 @@ def do_teleop(env, args, state, tel):
     return action
 
 
+def draw_ui(img_rgb, mode, saved, total):
+    """把相机图 + 按钮栏拼成显示图（BGR）。"""
+    canvas = np.zeros((IMG + BAR, IMG, 3), dtype=np.uint8)
+    canvas[:IMG] = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    cv2.putText(canvas, f"MODE: {mode}   SAVED: {saved}/{total}", (10, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    for name, (x, y, w, h) in BUTTONS.items():
+        active = (name == "start" and mode == "idle") or (name == "end" and mode == "recording")
+        color = (0, 140, 0) if active else (70, 70, 70)
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), color, -1)
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), (200, 200, 200), 1)
+        cv2.putText(canvas, LABELS[name], (x + 5, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+    return canvas
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo_id", default="local/piper_real")
-    ap.add_argument("--can_interface", default="can0", help="CAN 接口名（先 bash 01_setup_can.sh 激活）")
+    ap.add_argument("--can_interface", default="can0")
     ap.add_argument("--num_episodes", type=int, default=30)
     ap.add_argument("--max_steps", type=int, default=400)
-    ap.add_argument("--fps", type=int, default=10, help="数据记录帧率（数据集 fps）")
-    ap.add_argument("--ctrl_fps", type=int, default=50, help="控制环频率，高于 fps 时目标连续更新、消除顿挫")
-    ap.add_argument("--pos_delta", type=float, default=0.01, help="键盘每步末端移动量(米)")
+    ap.add_argument("--fps", type=int, default=10)
+    ap.add_argument("--ctrl_fps", type=int, default=50)
+    ap.add_argument("--pos_delta", type=float, default=0.01)
     ap.add_argument("--controller", choices=["keyboard", "gamepad"], default="keyboard")
-    ap.add_argument("--overwrite", action="store_true", help="覆盖旧数据（会先备份）")
-    ap.add_argument("--move_spd_rate", type=int, default=40, help="运动速度百分比 0~100，越低越平滑（默认 40）")
-    ap.add_argument("--stick_scale", type=float, default=0.002, help="摇杆满偏时每控制帧位移(米)，越小越慢（50Hz 下 0.002≈0.1m/s）")
-    ap.add_argument("--debug_log", default=None, help="调试日志 CSV 路径（记录目标/IK 关节角）")
+    ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--move_spd_rate", type=int, default=40)
+    ap.add_argument("--stick_scale", type=float, default=0.002)
+    ap.add_argument("--debug_log", default=None)
     args = ap.parse_args()
 
     if args.overwrite:
@@ -101,18 +131,13 @@ def main():
         if ds_dir and os.path.exists(ds_dir):
             backup = f"{ds_dir}.bak.{time.strftime('%Y%m%d_%H%M%S')}"
             shutil.move(ds_dir, backup)
-            print(f"[提示] 旧数据集已备份（未删除）→ {backup}")
+            print(f"[提示] 旧数据集已备份 → {backup}")
 
     env = RealPiperEnv(can_interface=args.can_interface, image_size=96, move_spd_rate=args.move_spd_rate)
-    ds = LeRobotDataset.create(
-        repo_id=args.repo_id, fps=args.fps,
-        features=build_features(), use_videos=True,
-    )
+    ds = LeRobotDataset.create(repo_id=args.repo_id, fps=args.fps, features=build_features(), use_videos=True)
 
-    state = {
-        "pressed": set(), "toggle_count": 0, "last_g": 0.0,
-        "new_episode": False, "quit": False, "discard_episode": False, "start_record": False,
-    }
+    state = {"pressed": set(), "toggle_count": 0, "last_g": 0.0, "quit": False, "discard_episode": False}
+    ui = {"start": False, "end": False, "home": False, "discard": False, "quit": False}
 
     def on_press(key):
         state["pressed"].add(key)
@@ -123,12 +148,6 @@ def main():
                 if now - state["last_g"] > 0.3:
                     state["toggle_count"] += 1
                     state["last_g"] = now
-            elif ch == "y":
-                state["start_record"] = True
-            elif ch in ("n", "\r"):
-                state["new_episode"] = True
-            elif ch == "x":
-                state["discard_episode"] = True
             elif ch == "q":
                 state["quit"] = True
         except Exception:
@@ -155,89 +174,79 @@ def main():
                         if code in ("ABS_X", "ABS_Y", "ABS_RX", "ABS_RY"):
                             state["stick"][code] = val
                         elif val == 1:
-                            if code == "BTN_SOUTH":       # A 夹爪
+                            if code == "BTN_SOUTH":   # A 夹爪
                                 state["toggle_count"] += 1
-                            elif code == "BTN_WEST":      # Y 开始录制
-                                state["start_record"] = True
-                            elif code == "BTN_START":     # Start 结束并保存
-                                state["new_episode"] = True
-                            elif code == "BTN_EAST":      # B 丢弃
+                            elif code == "BTN_EAST":  # B 丢弃
                                 state["discard_episode"] = True
-                            elif code == "BTN_SELECT":    # Select 退出
-                                state["quit"] = True
                 except Exception:
                     time.sleep(0.02)
 
         threading.Thread(target=gamepad_thread, daemon=True).start()
-        print("[提示] 手柄：左摇杆=前后左右 右摇杆上下=升降 A=夹爪 B=丢弃 Y=开始录制 Start=结束并保存 Select=退出")
+        print("[提示] 手柄：A=夹爪 B=丢弃；开始/结束/复位请点 UI 按钮")
 
-    saved = 0
-    debug_f = None
-    debug_w = None
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for name, (bx, by, bw, bh) in BUTTONS.items():
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    ui[name] = True
+
+    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(WIN, on_mouse)
+
+    debug_f, debug_w = None, None
     if args.debug_log:
         import csv
         debug_f = open(args.debug_log, "w", newline="")
         debug_w = csv.writer(debug_f)
-        debug_w.writerow(["ctrl_step", "tx", "ty", "tz"] + [f"raw_j{i}" for i in range(1, 7)] + ["gripper"])
+        debug_w.writerow(["ctrl_step", "mode"] + [f"tx{i}" for i in range(3)] + [f"raw_j{i}" for i in range(1, 7)] + ["gripper"])
 
+    saved = 0
+    mode = "idle"
+    tel = {"target": env.get_grasp_pos().copy(), "gripper": 0.0, "gripper_goal": 0.0}
+    ep_frames = []
+    step = 0
     record_every = max(1, args.ctrl_fps // args.fps)
-    window = "D435i (camera)"
+    ctrl_step = 0
+    img_cache = None
+
     try:
-        while saved < args.num_episodes and not state["quit"]:
-            print(f"\n=== 第 {saved+1}/{args.num_episodes} 条 ===")
+        while not state["quit"] and not ui["quit"] and saved < args.num_episodes:
+            action = do_teleop(env, args, state, tel)
+            ctrl_step += 1
 
-            # 1. 复位到 home
-            print("→ 机械臂复位到 home 姿态...")
-            smooth_move_to_home(env, args.ctrl_fps)
+            if ctrl_step % 3 == 0 or img_cache is None:
+                img_cache = env.render_image(IMG)
+                cv2.imshow(WIN, draw_ui(img_cache, mode, saved, args.num_episodes))
+                cv2.waitKey(1)
 
-            # 2. 待录制（摆道具，可自由遥控，不记录）
-            print("→ 摆好道具后按【Y】开始录制（可自由遥控，不记录）")
-            state["start_record"] = False
-            tel = {"target": env.get_grasp_pos().copy(), "gripper": 0.0, "gripper_goal": 0.0}
-            img_cache = None
-            preview_step = 0
-            while not state["start_record"] and not state["quit"]:
-                preview_step += 1
-                do_teleop(env, args, state, tel)
-                if preview_step % 3 == 0 or img_cache is None:
-                    img_cache = env.render_image(480)
-                    cv2.imshow(window, cv2.cvtColor(img_cache, cv2.COLOR_RGB2BGR))
-                    cv2.waitKey(1)
-            if state["quit"]:
-                break
-            state["start_record"] = False
+            # ---- UI 按钮 ----
+            if ui["home"]:
+                ui["home"] = False
+                print("→ 复位到 home...")
+                smooth_move_to_home(env, args.ctrl_fps)
+                tel["target"] = env.get_grasp_pos().copy()
+                img_cache = None
 
-            # 3. 再次复位，确保起点一致
-            print("→ 确认起点，复位到 home 后开始录制...")
-            smooth_move_to_home(env, args.ctrl_fps)
+            if ui["start"]:
+                ui["start"] = False
+                if mode == "idle":
+                    print("→ 开始录制：复位到 home...")
+                    smooth_move_to_home(env, args.ctrl_fps)
+                    tel["target"] = env.get_grasp_pos().copy()
+                    ep_frames = []
+                    step = 0
+                    state["discard_episode"] = False
+                    mode = "recording"
+                    img_cache = None
 
-            # 4. 录制
-            tel = {"target": env.get_grasp_pos().copy(), "gripper": 0.0, "gripper_goal": 0.0}
-            ep_frames = []
-            state["new_episode"] = False
-            state["discard_episode"] = False
-            ep_done = False
-            discard = False
-            step = 0
-            ctrl_step = 0
-            img_cache = None
-            qpos = env.get_qpos()
-            while not ep_done and step < args.max_steps and not state["quit"]:
-                ctrl_step += 1
-                action = do_teleop(env, args, state, tel)
-                qpos = env.get_qpos()
-                # 相机预览（每 3 个控制帧刷新）+ 记录（复用缓存帧缩到 96）
-                if ctrl_step % 3 == 0 or img_cache is None:
-                    img_cache = env.render_image(480)
-                    cv2.imshow(window, cv2.cvtColor(img_cache, cv2.COLOR_RGB2BGR))
-                    cv2.waitKey(1)
+            if mode == "recording":
                 if ctrl_step % record_every == 0:
-                    if step % 50 == 0:
-                        print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(tel['target'], 3)} 夹爪={'合' if tel['gripper'] > 0.02 else '开'}")
-                    img = cv2.resize(img_cache, (96, 96))
+                    if img_cache is None:
+                        img_cache = env.render_image(IMG)
+                    img96 = cv2.resize(img_cache, (96, 96))
                     ep_frames.append({
-                        "observation.image": img,
-                        "observation.state": qpos,
+                        "observation.image": img96,
+                        "observation.state": env.get_qpos(),
                         "action": action,
                         "next.reward": np.array([0.0], dtype=np.float32),
                         "next.done": np.array([False]),
@@ -245,24 +254,30 @@ def main():
                         "task": "grasp the object and lift it",
                     })
                     if debug_w is not None:
-                        debug_w.writerow([ctrl_step, *np.round(tel["target"], 4), *np.round(action[:6], 4), round(float(tel["gripper"]), 4)])
+                        debug_w.writerow([ctrl_step, "recording", *np.round(tel["target"], 4),
+                                          *np.round(action[:6], 4), round(float(tel["gripper"]), 4)])
                     step += 1
-                if state["discard_episode"]:
-                    discard = True
-                    ep_done = True
-                if state["new_episode"]:
-                    ep_done = True
 
-            if discard:
-                print(f"✗ 第 {saved+1} 条已丢弃（失败数据不保存）")
-            elif ep_frames:
-                for frame in ep_frames:
-                    ds.add_frame(frame)
-                ds.save_episode()
-                saved += 1
-                print(f"✓ 已保存 {saved}/{args.num_episodes} | 帧数 {len(ep_frames)}")
-            state["new_episode"] = False
-            state["discard_episode"] = False
+                if ui["end"]:
+                    ui["end"] = False
+                    if ep_frames:
+                        for f in ep_frames:
+                            ds.add_frame(f)
+                        ds.save_episode()
+                        saved += 1
+                        print(f"✓ 已保存 {saved}/{args.num_episodes} | 帧数 {len(ep_frames)}")
+                    ep_frames = []
+                    mode = "idle"
+                if ui["discard"] or state["discard_episode"]:
+                    ui["discard"] = False
+                    state["discard_episode"] = False
+                    print("✗ 本条已丢弃")
+                    ep_frames = []
+                    mode = "idle"
+            else:
+                ui["end"] = False
+                ui["discard"] = False
+                state["discard_episode"] = False
     finally:
         state["stop"] = True
         ds.finalize()
