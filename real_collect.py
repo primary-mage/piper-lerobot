@@ -38,8 +38,7 @@ def main():
     ap.add_argument("--controller", choices=["keyboard", "gamepad"], default="keyboard")
     ap.add_argument("--overwrite", action="store_true", help="覆盖旧数据（会先备份）")
     ap.add_argument("--move_spd_rate", type=int, default=40, help="运动速度百分比 0~100，越低越平滑（默认 40）")
-    ap.add_argument("--smooth_alpha", type=float, default=0.3, help="IK 关节目标 EMA 平滑系数 0~1（0=不平滑）")
-    ap.add_argument("--debug_log", default=None, help="调试日志 CSV 路径（记录目标/原始IK/平滑后关节角）")
+    ap.add_argument("--debug_log", default=None, help="调试日志 CSV 路径（记录目标/IK 关节角）")
     args = ap.parse_args()
 
     if args.overwrite:
@@ -113,14 +112,13 @@ def main():
 
     saved = 0
     ep = 0
-    prev_arm_q = None  # 上一帧平滑后的关节目标（EMA）
     debug_f = None
     debug_w = None
     if args.debug_log:
         import csv
         debug_f = open(args.debug_log, "w", newline="")
         debug_w = csv.writer(debug_f)
-        debug_w.writerow(["step", "tx", "ty", "tz"] + [f"raw_j{i}" for i in range(1, 7)] + [f"smooth_j{i}" for i in range(1, 7)] + ["gripper"])
+        debug_w.writerow(["ctrl_step", "tx", "ty", "tz"] + [f"raw_j{i}" for i in range(1, 7)] + ["gripper"])
     try:
         while saved < args.num_episodes and not state["quit"]:
             qpos = env.get_qpos()
@@ -172,20 +170,10 @@ def main():
 
                 # IK（数字孪生）
                 arm_q = env.solve_ik(target_pos)
-                # EMA 平滑关节目标，消除 IK 抖动
-                if prev_arm_q is None:
-                    arm_q_s = arm_q
-                else:
-                    arm_q_s = args.smooth_alpha * arm_q + (1 - args.smooth_alpha) * prev_arm_q
-                prev_arm_q = arm_q_s
-                action = np.concatenate([arm_q_s, [gripper]]).astype(np.float32)
-                # 调试日志
+                action = np.concatenate([arm_q, [gripper]]).astype(np.float32)
+                # 调试日志（可选）
                 if debug_w is not None:
-                    debug_w.writerow([step, *np.round(target_pos, 4), *np.round(arm_q, 4), *np.round(arm_q_s, 4), round(float(gripper), 4)])
-
-                # 调试日志（用控制帧计数）
-                if debug_w is not None:
-                    debug_w.writerow([ctrl_step, *np.round(target_pos, 4), *np.round(arm_q, 4), *np.round(arm_q_s, 4), round(float(gripper), 4)])
+                    debug_w.writerow([ctrl_step, *np.round(target_pos, 4), *np.round(arm_q, 4), round(float(gripper), 4)])
 
                 # 发真机（每控制帧，50Hz）
                 env.send_action(action)
