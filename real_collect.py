@@ -90,6 +90,10 @@ def do_teleop(env, args, state, tel):
     elif tel["gripper"] > tel["gripper_goal"]:
         tel["gripper"] = max(tel["gripper"] - ramp, tel["gripper_goal"])
     arm_q = env.solve_ik(tel["target"])
+    # EMA 平滑 IK 输出，减少冗余自由度（J4/J6）的零空间抖动
+    if tel.get("prev_arm_q") is not None:
+        arm_q = args.ik_smooth * arm_q + (1.0 - args.ik_smooth) * tel["prev_arm_q"]
+    tel["prev_arm_q"] = arm_q
     action = np.concatenate([arm_q, [tel["gripper"]]]).astype(np.float32)
     env.send_action(action)
     time.sleep(1.0 / args.ctrl_fps)
@@ -124,6 +128,7 @@ def main():
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--move_spd_rate", type=int, default=40)
     ap.add_argument("--stick_scale", type=float, default=0.002)
+    ap.add_argument("--ik_smooth", type=float, default=0.3, help="IK输出EMA平滑0~1(1=不平滑)，减少J4/J6零空间抖动")
     ap.add_argument("--debug_log", default=None)
     args = ap.parse_args()
 
