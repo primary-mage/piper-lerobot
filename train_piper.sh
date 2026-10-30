@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# 训练 ACT（用键盘遥操采集的数据集）。用法：bash train_piper.sh [训练步数]
+# 训练 ACT。用法：bash train_piper.sh [步数] [数据集repo_id]
+#   默认：20000 步，数据集 local/piper_real（真机数据）
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1090
 source "$SCRIPT_DIR/common.sh"
-activate_env   # 会自动清 LD_LIBRARY_PATH + 代理（避免 cublasLt 崩溃）
+activate_env   # 自动清 LD_LIBRARY_PATH + 代理（避免 cublasLt 崩溃）
 
 STEPS="${1:-20000}"
-DATASET="local/piper_keyboard"   # 与 sim_collect_piper.py 的默认 repo_id 一致
-OUT="$HOME/lerobot_outputs/act_piper_keyboard"
+DATASET="${2:-local/piper_real}"
+OUT="$HOME/lerobot_outputs/act_$(basename "$DATASET")"
 
-info "训练 ACT | 数据集: $DATASET | 步数: $STEPS"
-rm -rf "$OUT" "$OUT.log"   # $OUT 必须不存在（lerobot-train 会自己创建），日志存独立文件
+info "训练 ACT | 数据集: $DATASET | 步数: $STEPS | 输出: $OUT"
+rm -rf "$OUT" "$OUT.log"
 
-# tee 同时把日志打到终端 + 存文件，训练完可用 python plot_training.py $OUT.log 画曲线
 lerobot-train \
   --policy.type=act \
   --dataset.repo_id="$DATASET" \
