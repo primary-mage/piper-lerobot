@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""松灵 Piper 真机环境：piper_sdk 读/写 CAN + D435i 相机 + MuJoCo 数字孪生做 IK。
+
+与仿真版 PiperEnv 接口对齐（get_qpos / send_action / get_grasp_pos / solve_ik / render_image），
+这样采集脚本只需切换底层环境即可，手柄 + IK + 采集逻辑完全复用。
+
+注意：真机无"方块高度"这种地面真值，所以没有 reward / cube_height。
+"""
+import cv2
+import mujoco
+import numpy as np
+
+from piper_sim import PiperEnv  # 数字孪生（只为 IK + 夹爪中点，不参与真机物理）
+
+try:
+    from piper_sdk import C_PiperInterface, C_PiperInterface_V2
+except ImportError:  # pragma: no cover
+    C_PiperInterface = C_PiperInterface_V2 = None
+
+try:
+    import pyrealsense2 as rs
+except ImportError:  # pragma: no cover
+    rs = None
+
+# piper_sdk 关节角单位：0.001 度（见 GetArmJointMsgs 文档）
+DEG_TO_RAD = np.pi / 180.0
+JOINT_INT_TO_RAD = 0.001 * DEG_TO_RAD   # 读：int → rad
+JOINT_RAD_TO_INT = 1.0 / JOINT_INT_TO_RAD  # 发：rad → int
+
+ARM_JOINT_ATTRS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+
+
+class RealPiperEnv:
+    """真机 Piper 环境。接口与 PiperEnv 对齐，供采集/部署脚本调用。"""
+
+    def __init__(self, can_interface="can0", image_size=96, enable_arm=True, use_depth=False):
+        self.can_interface = can_interface
+        self.image_size = image_size
+        self.use_depth = use_depth
+
+        # 1. 真机连接（piper_sdk，优先 V2 回退 V1）
+        if C_PiperInterface is None:
+            raise RuntimeError("未安装 piper_sdk，请先 pip install piper_sdk")
+        try:
+            self.piper = C_PiperInterface_V2()
+        except Exception:
+            self.piper = C_PiperInterface()
+        self.piper.ConnectPort()
+        if enable_arm:
+            self.piper.EnableArm(7)  # 使能 6 关节 + 夹爪
+
+        # 2. MuJoCo 数字孪生（只为 IK + 夹爪中点）
+        self.twin = PiperEnv(image_size=image_size)
+
+        # 3. D435i 相机（RGB 流；可选深度）
+        self.pipeline = None
+        if rs is not None:
+            self.pipeline = rs.pipeline()
+            cfg = rs.config()
+            cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            if use_depth:
+                cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+            self.pipeline.start(cfg)
+            for _ in range(30):  # 预热，等自动曝光稳定
+                self.pipeline.wait_for_frames()
+        else:
+            print("[警告] 未安装 pyrealsense2，相机不可用。安装：pip install pyrealsense2")
+
+    # ---- 真机读关节角 ----
+    def get_qpos(self):
+        """读真机关节角：6 手臂(rad) + 1 夹爪(归一化 0~1)。"""
+        msgs = self.piper.GetArmJointMsgs()
+        arm_rad = np.array(
+            [getattr(msgs, n) * JOINT_INT_TO_RAD for n in ARM_JOINT_ATTRS], dtype=np.float32
+        )
+        gripper = self._read_gripper()
+        return np.concatenate([arm_rad, [gripper]]).astype(np.float32)
+
+    def _read_gripper(self):
+        """读夹爪，归一化到 0~1（0=张开，1=闭合）。TODO: 具体字段/量程需真机验证。"""
+        try:
+            g = self.piper.GetArmGripperMsgs()
+            # ArmMsgFeedBackGripperStates 常见字段名之一
+            angle = getattr(g, "gripper_angle", getattr(g, "gripper_1_angle", 0))
+            return float(angle) / 1000.0  # TODO: 归一化因子需真机标定
+        except Exception:
+            return 0.0
+
+    # ---- 真机发关节指令 ----
+    def send_action(self, action):
+        """发 7 维目标：6 手臂关节(rad) + 夹爪(0~1)。"""
+        action = np.asarray(action, dtype=np.float64)
+        arm_int = [int(round(a * JOINT_RAD_TO_INT)) for a in action[:6]]
+        self.piper.JointCtrl(*arm_int)
+        gripper_int = int(action[6] * 1000)  # TODO: 夹爪量程需真机标定
+        self.piper.GripperCtrl(gripper_int, 0, 0, 0)
+
+    # ---- 数字孪生：把真机关节角同步进 MuJoCo 模型，再算夹爪中点/IK ----
+    def _sync_twin(self):
+        q = self.get_qpos()
+        for i, qid in enumerate(self.twin.arm_qpos_ids):
+            self.twin.data.qpos[qid] = q[i]
+        self.twin.data.qpos[self.twin.gripper_qpos_id] = 0.0
+        mujoco.mj_forward(self.twin.model, self.twin.data)
+        return q
+
+    def get_grasp_pos(self):
+        """夹爪两指中点（世界坐标），用数字孪生算。"""
+        self._sync_twin()
+        return self.twin.get_grasp_pos()
+
+    def solve_ik(self, target_pos):
+        """用数字孪生做 IK，返回 6 个手臂关节角(rad)。"""
+        self._sync_twin()
+        return self.twin.solve_ik(target_pos)
+
+    # ---- 相机 ----
+    def render_image(self, size=None):
+        """从 D435i 读 RGB 图（BGR→RGB，resize 到 size）。"""
+        if self.pipeline is None:
+            raise RuntimeError("D435i 相机未初始化")
+        frames = self.pipeline.wait_for_frames()
+        color = frames.get_color_frame()
+        img = np.asanyarray(color.get_data())  # BGR
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        size = size or self.image_size
+        if img.shape[0] != size:
+            img = cv2.resize(img, (size, size))
+        return img
+
+    def close(self):
+        try:
+            self.piper.DisableArm(7)
+            self.piper.DisconnectPort()
+        except Exception:
+            pass
+        if self.pipeline is not None:
+            self.pipeline.stop()
+
+
+if __name__ == "__main__":
+    env = RealPiperEnv(can_interface="can0")
+    print("真机关节角:", np.round(env.get_qpos(), 4))
+    env.close()
+    print("RealPiperEnv 自检通过 ✓")
