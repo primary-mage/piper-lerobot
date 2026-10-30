@@ -51,6 +51,11 @@ class RealPiperEnv:
                 if time.time() - t0 > 5:
                     raise RuntimeError("使能手臂超时")
                 time.sleep(0.01)
+        # 预热：等 CAN 反馈更新，避免首帧读到全 0
+        time.sleep(0.5)
+        for _ in range(5):
+            self.piper.GetArmJointMsgs()
+            time.sleep(0.05)
 
         # 2. MuJoCo 数字孪生（只为 IK + 夹爪中点）
         self.twin = PiperEnv(image_size=image_size)
