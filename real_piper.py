@@ -137,6 +137,7 @@ class RealPiperEnv:
 
     def close(self):
         try:
+            self.piper.GripperCtrl(0, 1000, 0x00, 0)  # 失能夹爪（DisablePiper 只管 6 个手臂关节）
             self.piper.DisablePiper()
             self.piper.DisconnectPort()
         except Exception:
