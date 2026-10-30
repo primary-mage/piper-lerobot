@@ -6,6 +6,8 @@
 
 注意：真机无"方块高度"这种地面真值，所以没有 reward / cube_height。
 """
+import time
+
 import cv2
 import mujoco
 import numpy as np
@@ -38,16 +40,17 @@ class RealPiperEnv:
         self.image_size = image_size
         self.use_depth = use_depth
 
-        # 1. 真机连接（piper_sdk，优先 V2 回退 V1）
-        if C_PiperInterface is None:
+        # 1. 真机连接（piper_sdk V2 协议）
+        if C_PiperInterface_V2 is None:
             raise RuntimeError("未安装 piper_sdk，请先 pip install piper_sdk")
-        try:
-            self.piper = C_PiperInterface_V2()
-        except Exception:
-            self.piper = C_PiperInterface()
+        self.piper = C_PiperInterface_V2(self.can_interface)
         self.piper.ConnectPort()
         if enable_arm:
-            self.piper.EnableArm(7)  # 使能 6 关节 + 夹爪
+            t0 = time.time()
+            while not self.piper.EnablePiper():
+                if time.time() - t0 > 5:
+                    raise RuntimeError("使能手臂超时")
+                time.sleep(0.01)
 
         # 2. MuJoCo 数字孪生（只为 IK + 夹爪中点）
         self.twin = PiperEnv(image_size=image_size)
@@ -70,8 +73,9 @@ class RealPiperEnv:
     def get_qpos(self):
         """读真机关节角：6 手臂(rad) + 1 夹爪(归一化 0~1)。"""
         msgs = self.piper.GetArmJointMsgs()
+        js = msgs.joint_state  # 关节角在 joint_state 里
         arm_rad = np.array(
-            [getattr(msgs, n) * JOINT_INT_TO_RAD for n in ARM_JOINT_ATTRS], dtype=np.float32
+            [getattr(js, n) * JOINT_INT_TO_RAD for n in ARM_JOINT_ATTRS], dtype=np.float32
         )
         gripper = self._read_gripper()
         return np.concatenate([arm_rad, [gripper]]).astype(np.float32)
@@ -91,9 +95,10 @@ class RealPiperEnv:
         """发 7 维目标：6 手臂关节(rad) + 夹爪(0~1)。"""
         action = np.asarray(action, dtype=np.float64)
         arm_int = [int(round(a * JOINT_RAD_TO_INT)) for a in action[:6]]
+        self.piper.MotionCtrl_2(0x01, 0x01, 100, 0x00)  # CAN 控制 + MOVE J 关节模式
         self.piper.JointCtrl(*arm_int)
         gripper_int = int(action[6] * 1000)  # TODO: 夹爪量程需真机标定
-        self.piper.GripperCtrl(gripper_int, 0, 0, 0)
+        self.piper.GripperCtrl(gripper_int, 1000, 0x01, 0)
 
     # ---- 数字孪生：把真机关节角同步进 MuJoCo 模型，再算夹爪中点/IK ----
     def _sync_twin(self):
@@ -130,7 +135,7 @@ class RealPiperEnv:
 
     def close(self):
         try:
-            self.piper.DisableArm(7)
+            self.piper.DisablePiper()
             self.piper.DisconnectPort()
         except Exception:
             pass
