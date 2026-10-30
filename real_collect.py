@@ -146,9 +146,9 @@ def main():
                 # 夹爪切换 + 斜坡
                 while state["toggle_count"] > 0:
                     state["toggle_count"] -= 1
-                    gripper_goal = 1.0 if gripper_goal < 0.5 else 0.0
-                    print(f"  夹爪目标 → {'闭合' if gripper_goal > 0.5 else '张开'}")
-                ramp = 1.0 / GRIPPER_RAMP_STEPS
+                    gripper_goal = 0.035 if gripper_goal < 0.02 else 0.0  # 0=开, 0.035=闭（与仿真一致）
+                    print(f"  夹爪目标 → {'闭合' if gripper_goal > 0.02 else '张开'}")
+                ramp = 0.035 / GRIPPER_RAMP_STEPS
                 if gripper < gripper_goal:
                     gripper = min(gripper + ramp, gripper_goal)
                 elif gripper > gripper_goal:
@@ -159,7 +159,7 @@ def main():
                 action = np.concatenate([arm_q, [gripper]]).astype(np.float32)
 
                 if step % 50 == 0:
-                    print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} 夹爪={'合' if gripper > 0.5 else '开'}")
+                    print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} 夹爪={'合' if gripper > 0.02 else '开'}")
 
                 img = env.render_image(96)  # 数据集用 96×96
                 ep_frames.append({

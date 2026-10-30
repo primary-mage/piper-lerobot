@@ -81,14 +81,10 @@ class RealPiperEnv:
         return np.concatenate([arm_rad, [gripper]]).astype(np.float32)
 
     def _read_gripper(self):
-        """读夹爪，归一化到 0~1（0=张开，1=闭合）。TODO: 具体字段/量程需真机验证。"""
-        try:
-            g = self.piper.GetArmGripperMsgs()
-            # ArmMsgFeedBackGripperStates 常见字段名之一
-            angle = getattr(g, "gripper_angle", getattr(g, "gripper_1_angle", 0))
-            return float(angle) / 1000.0  # TODO: 归一化因子需真机标定
-        except Exception:
-            return 0.0
+        """读夹爪，映射到仿真约定：0=张开，0.035=闭合。"""
+        g = self.piper.GetArmGripperMsgs().gripper_state
+        mm = g.grippers_angle / 1000.0  # 0.001mm → mm（量程 0~70mm）
+        return 0.035 * (1.0 - mm / 70.0)  # 70mm 开→0，0mm 闭→0.035
 
     # ---- 真机发关节指令 ----
     def send_action(self, action):
@@ -97,7 +93,7 @@ class RealPiperEnv:
         arm_int = [int(round(a * JOINT_RAD_TO_INT)) for a in action[:6]]
         self.piper.MotionCtrl_2(0x01, 0x01, 100, 0x00)  # CAN 控制 + MOVE J 关节模式
         self.piper.JointCtrl(*arm_int)
-        gripper_int = int(action[6] * 1000)  # TODO: 夹爪量程需真机标定
+        gripper_int = int(round((1.0 - action[6] / 0.035) * 70.0 * 1000))  # 仿真约定 0=开(70mm) 0.035=闭(0mm)
         self.piper.GripperCtrl(gripper_int, 1000, 0x01, 0)
 
     # ---- 数字孪生：把真机关节角同步进 MuJoCo 模型，再算夹爪中点/IK ----
