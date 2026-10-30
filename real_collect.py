@@ -115,7 +115,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo_id", default="local/piper_real")
     ap.add_argument("--can_interface", default="can0")
-    ap.add_argument("--num_episodes", type=int, default=30)
+    ap.add_argument("--num_episodes", type=int, default=30, help="显示用目标条数(不再自动退出，只能手动 QUIT)")
     ap.add_argument("--max_steps", type=int, default=400)
     ap.add_argument("--fps", type=int, default=10)
     ap.add_argument("--ctrl_fps", type=int, default=50)
@@ -211,7 +211,7 @@ def main():
     img_cache = None
 
     try:
-        while not state["quit"] and not ui["quit"] and saved < args.num_episodes:
+        while not state["quit"] and not ui["quit"]:
             action = do_teleop(env, args, state, tel)
             ctrl_step += 1
 
