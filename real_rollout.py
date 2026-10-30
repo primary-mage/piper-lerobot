@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""真机 ACT 策略部署：加载训练好的 ACT，读真机关节角 + D435i 相机，输出动作发真机。
+"""真机 ACT 策略部署（START 按钮控制节奏）。
 
-UI：[EMERGENCY STOP] 立即中止；[NORMAL END] 结束当前轮。
+UI（鼠标点击）：
+  空闲：[START]  [EMERGENCY STOP]  [QUIT]
+  录制：[END]    [EMERGENCY STOP]  [QUIT]
 
-抖动修复：策略按 fps(10Hz) 推理，但动作按 ctrl_fps(50Hz) 线性插值发送，
-避免 10Hz 台阶导致手臂顿挫（与遥操 50Hz 同理）。
+流程：
+  启动 → 空闲（手臂回 home，相机预览）→ 你摆道具 → 点 START
+  → 策略推理（max_steps 或点 END）→ 回 home、回到空闲 → 摆道具 → START ...
+  → QUIT 退出（拖动示教悬停）
 
-用法：bash real_rollout.sh [检查点] [--num_episodes 3] [--debug_log /tmp/roll.csv]
+抖动修复：策略按 fps(10Hz) 推理，动作按 ctrl_fps(50Hz) 插值发送。
 """
 import argparse
 import time
@@ -24,10 +28,10 @@ HOME_QPOS_REAL = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0], dtype=np.float32)
 WIN = "Real ACT (Camera + Control)"
 IMG_W, IMG_H, BAR = 480, 360, 90
 BUTTONS = {
-    "stop": (5, IMG_H + 10, 230, 70),
-    "end":  (245, IMG_H + 10, 230, 70),
+    "start": (5, IMG_H + 10, 150, 70),
+    "stop":  (165, IMG_H + 10, 150, 70),
+    "quit":  (325, IMG_H + 10, 150, 70),
 }
-LABELS = {"stop": "EMERGENCY STOP", "end": "NORMAL END"}
 
 
 def load_stats(checkpoint: str) -> dict:
@@ -47,20 +51,25 @@ def load_stats(checkpoint: str) -> dict:
     }
 
 
-def draw_ui(img_rgb, ep, num_ep, step, max_steps):
+def draw_ui(img_rgb, mode, episodes_done, step, max_steps):
     canvas = np.zeros((IMG_H + BAR, IMG_W, 3), dtype=np.uint8)
     canvas[:IMG_H] = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    cv2.putText(canvas, f"EP {ep}/{num_ep}   STEP {step}/{max_steps}", (10, 24),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(canvas, f"MODE: {mode}   DONE: {episodes_done}   STEP: {step}/{max_steps}",
+                (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+    labels = {
+        "start": "START" if mode == "idle" else "END",
+        "stop": "EMERGENCY STOP",
+        "quit": "QUIT",
+    }
+    colors = {"start": (0, 140, 0), "stop": (0, 0, 200), "quit": (70, 70, 70)}
     for name, (x, y, w, h) in BUTTONS.items():
-        color = (0, 0, 200) if name == "stop" else (0, 140, 0)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), color, -1)
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), colors[name], -1)
         cv2.rectangle(canvas, (x, y), (x + w, y + h), (200, 200, 200), 1)
-        cv2.putText(canvas, LABELS[name], (x + 30, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+        cv2.putText(canvas, labels[name], (x + 8, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     return canvas
 
 
-def move_to_home(env, ui, ctrl_fps=30, duration=2.5):
+def smooth_move_to_home(env, ui, ctrl_fps=30, duration=2.5):
     q_cur = env.get_qpos()
     q_start = q_cur[:6].copy()
     grip = float(q_cur[6])
@@ -77,13 +86,12 @@ def move_to_home(env, ui, ctrl_fps=30, duration=2.5):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--num_episodes", type=int, default=3)
-    ap.add_argument("--max_steps", type=int, default=400)
+    ap.add_argument("--max_steps", type=int, default=400, help="单轮最多推理步数")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--fps", type=int, default=10, help="策略推理频率（与训练 fps 一致）")
     ap.add_argument("--ctrl_fps", type=int, default=50, help="动作发送频率（插值），越高越平滑")
     ap.add_argument("--move_spd_rate", type=int, default=30)
-    ap.add_argument("--debug_log", default=None, help="调试日志 CSV 路径")
+    ap.add_argument("--debug_log", default=None)
     ap.add_argument("--no_confirm", action="store_true")
     args = ap.parse_args()
 
@@ -95,7 +103,7 @@ def main():
     if not args.no_confirm:
         input("按回车开始，Ctrl+C 取消...")
 
-    ui = {"stop": False, "end": False}
+    ui = {"start": False, "stop": False, "quit": False}
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -111,64 +119,85 @@ def main():
         import csv
         debug_f = open(args.debug_log, "w", newline="")
         debug_w = csv.writer(debug_f)
-        debug_w.writerow(["step", "ep"] + [f"q{i}" for i in range(7)] + [f"a{i}" for i in range(7)])
+        debug_w.writerow(["ep", "step"] + [f"q{i}" for i in range(7)] + [f"a{i}" for i in range(7)])
 
-    sub = max(1, args.ctrl_fps // args.fps)  # 每个策略步插值成 sub 个控制帧
+    sub = max(1, args.ctrl_fps // args.fps)
+    mode = "idle"
+    episodes_done = 0
+    step = 0
     prev_action = None
 
     try:
-        for ep in range(args.num_episodes):
-            if ui["stop"]:
-                break
-            print(f"\n=== 部署第 {ep+1}/{args.num_episodes} 轮 ===")
-            policy.reset()
-            move_to_home(env, ui)
-            if ui["stop"]:
-                break
-            prev_action = None
-            print("已复位到 home，开始策略推理...")
-            for t in range(args.max_steps):
-                if ui["stop"]:
-                    break
-                if ui["end"]:
-                    ui["end"] = False
-                    print("→ 正常结束本轮")
-                    break
+        while not ui["quit"] and not ui["stop"]:
+            # 读取相机 + 显示 UI（空闲/录制都刷新）
+            img480 = env.render_image(480, keep_aspect=True)
+            cv2.imshow(WIN, draw_ui(img480, mode, episodes_done, step, args.max_steps))
+            cv2.waitKey(1)
 
-                qpos = env.get_qpos()
-                img480 = env.render_image(480, keep_aspect=True)
-                img = cv2.resize(img480, (96, 96))
-                cv2.imshow(WIN, draw_ui(img480, ep + 1, args.num_episodes, t, args.max_steps))
-                cv2.waitKey(1)
-
-                img_f = img.astype(np.float32) / 255.0
-                img_chw = img_f.transpose(2, 0, 1)
-                img_norm = (img_chw - stats["img_mean"]) / stats["img_std"]
-                state_norm = (qpos - stats["state_mean"]) / stats["state_std"]
-
-                batch = {
-                    "observation.state": torch.from_numpy(state_norm).float().unsqueeze(0).to(args.device),
-                    "observation.image": torch.from_numpy(img_norm).float().unsqueeze(0).to(args.device),
-                }
-                with torch.inference_mode():
-                    action = policy.select_action(batch)
-                action = action * torch.from_numpy(stats["action_std"]).to(args.device) + torch.from_numpy(stats["action_mean"]).to(args.device)
-                action_np = action[0].cpu().numpy().astype(np.float32)
-
-                if debug_w is not None:
-                    debug_w.writerow([t, ep, *np.round(qpos, 4), *np.round(action_np, 4)])
-
-                # 动作按 ctrl_fps 插值发送（消除 10Hz 台阶顿挫）
-                a_prev = action_np if prev_action is None else prev_action
-                for k in range(sub):
+            if mode == "idle":
+                if ui["start"]:
+                    ui["start"] = False
+                    print(f"\n=== 第 {episodes_done+1} 轮：复位到 home ===")
+                    smooth_move_to_home(env, ui)
                     if ui["stop"]:
                         break
-                    alpha = (k + 1) / sub
-                    interp = (1.0 - alpha) * a_prev + alpha * action_np
-                    env.send_action(interp)
-                    time.sleep(1.0 / args.ctrl_fps)
-                prev_action = action_np
-            print(f"第 {ep+1} 轮结束")
+                    policy.reset()
+                    prev_action = None
+                    step = 0
+                    mode = "recording"
+                    print("开始策略推理...")
+                else:
+                    time.sleep(1.0 / 20.0)  # 空闲轮询 20Hz
+                continue
+
+            # ---- 录制中 ----
+            if ui["stop"]:
+                break
+            if ui["start"]:  # 录制中 START 已被当作 END
+                ui["start"] = False
+                print("→ 正常结束本轮")
+                smooth_move_to_home(env, ui)
+                episodes_done += 1
+                mode = "idle"
+                continue
+            if step >= args.max_steps:
+                print(f"→ 本轮达到 {args.max_steps} 步，结束")
+                smooth_move_to_home(env, ui)
+                episodes_done += 1
+                mode = "idle"
+                continue
+
+            qpos = env.get_qpos()
+            img = cv2.resize(img480, (96, 96))
+            img_f = img.astype(np.float32) / 255.0
+            img_chw = img_f.transpose(2, 0, 1)
+            img_norm = (img_chw - stats["img_mean"]) / stats["img_std"]
+            state_norm = (qpos - stats["state_mean"]) / stats["state_std"]
+
+            batch = {
+                "observation.state": torch.from_numpy(state_norm).float().unsqueeze(0).to(args.device),
+                "observation.image": torch.from_numpy(img_norm).float().unsqueeze(0).to(args.device),
+            }
+            with torch.inference_mode():
+                action = policy.select_action(batch)
+            action = action * torch.from_numpy(stats["action_std"]).to(args.device) + torch.from_numpy(stats["action_mean"]).to(args.device)
+            action_np = action[0].cpu().numpy().astype(np.float32)
+
+            if debug_w is not None:
+                debug_w.writerow([episodes_done, step, *np.round(qpos, 4), *np.round(action_np, 4)])
+
+            # 50Hz 插值发送
+            a_prev = action_np if prev_action is None else prev_action
+            for k in range(sub):
+                if ui["stop"] or ui["quit"]:
+                    break
+                alpha = (k + 1) / sub
+                interp = (1.0 - alpha) * a_prev + alpha * action_np
+                env.send_action(interp)
+                time.sleep(1.0 / args.ctrl_fps)
+            prev_action = action_np
+            step += 1
+
         if ui["stop"]:
             print("\n[紧急停止] 部署已中止")
     except KeyboardInterrupt:
@@ -181,7 +210,7 @@ def main():
         except Exception:
             pass
         env.close()
-    print("真机部署结束")
+    print(f"真机部署结束（完成 {episodes_done} 轮）")
 
 
 if __name__ == "__main__":
