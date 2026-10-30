@@ -157,7 +157,7 @@ def main():
                         elif val == 1:
                             if code == "BTN_SOUTH":       # A 夹爪
                                 state["toggle_count"] += 1
-                            elif code == "BTN_NORTH":     # Y 开始录制
+                            elif code == "BTN_WEST":      # Y 开始录制
                                 state["start_record"] = True
                             elif code == "BTN_START":     # Start 结束并保存
                                 state["new_episode"] = True
