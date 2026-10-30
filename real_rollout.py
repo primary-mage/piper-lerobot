@@ -26,13 +26,18 @@ HOME_QPOS_REAL = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0], dtype=np.float32)
 def load_stats(checkpoint: str) -> dict:
     pre = st.load_file(f"{checkpoint}/policy_preprocessor_step_3_normalizer_processor.safetensors")
     post = st.load_file(f"{checkpoint}/policy_postprocessor_step_0_unnormalizer_processor.safetensors")
+    state_std = pre["observation.state.std"].numpy().copy()
+    action_std = post["action.std"].numpy().copy()
+    # 防护：std=0 的维度（采集时从没动过的关节）除以 0 会产生 NaN，用 1.0 代替
+    state_std = np.where(np.abs(state_std) < 1e-8, 1.0, state_std)
+    action_std = np.where(np.abs(action_std) < 1e-8, 0.0, action_std)
     return {
         "img_mean": pre["observation.image.mean"].numpy(),
         "img_std": pre["observation.image.std"].numpy(),
         "state_mean": pre["observation.state.mean"].numpy(),
-        "state_std": pre["observation.state.std"].numpy(),
+        "state_std": state_std,
         "action_mean": post["action.mean"].numpy(),
-        "action_std": post["action.std"].numpy(),
+        "action_std": action_std,
     }
 
 
