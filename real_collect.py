@@ -38,6 +38,7 @@ def main():
     ap.add_argument("--controller", choices=["keyboard", "gamepad"], default="keyboard")
     ap.add_argument("--overwrite", action="store_true", help="覆盖旧数据（会先备份）")
     ap.add_argument("--move_spd_rate", type=int, default=40, help="运动速度百分比 0~100，越低越平滑（默认 40）")
+    ap.add_argument("--stick_scale", type=float, default=0.002, help="摇杆满偏时每控制帧位移(米)，越小越慢（50Hz 下 0.002≈0.1m/s）")
     ap.add_argument("--debug_log", default=None, help="调试日志 CSV 路径（记录目标/IK 关节角）")
     args = ap.parse_args()
 
@@ -140,9 +141,10 @@ def main():
                 # 控制器 → 目标末端位置
                 if args.controller == "gamepad":
                     st = state["stick"]
-                    target_pos[0] += stick_to_delta(st.get("ABS_X", 0))
-                    target_pos[1] += -stick_to_delta(st.get("ABS_Y", 0))
-                    target_pos[2] += -stick_to_delta(st.get("ABS_RY", 0))
+                    sc = args.stick_scale
+                    target_pos[0] += stick_to_delta(st.get("ABS_X", 0), scale=sc)
+                    target_pos[1] += -stick_to_delta(st.get("ABS_Y", 0), scale=sc)
+                    target_pos[2] += -stick_to_delta(st.get("ABS_RY", 0), scale=sc)
                 else:
                     if kb.KeyCode.from_char("w") in state["pressed"] or kb.Key.up in state["pressed"]:
                         target_pos[0] += args.pos_delta
