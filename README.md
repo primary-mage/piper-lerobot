@@ -1,9 +1,13 @@
-# 松灵 Piper + LeRobot 自主抓取 · 仿真闭环（sim2sim）
+# 松灵 Piper + LeRobot 自主抓取（仿真 + 真机）
 
-在 **MuJoCo** 里仿真松灵 Piper 六轴机械臂，用**键盘 / Xbox 手柄做笛卡尔遥操作**采集数据，
-训练 **ACT** 策略，再回到仿真里**部署抓取**。全程脱离真机，用于把「采集 → 训练 → 部署」整条链路跑通、摸熟。
+用 **LeRobot ACT（动作分块模仿学习）** 控制松灵 **Piper** 六轴机械臂完成「抓取物体并抬起」。
+项目包含 **MuJoCo 仿真** 与 **真机** 两套完整链路：遥操作采集 → 训练 ACT → 部署推理。
 
-> 最终目标是把这套流程迁移到真机（piper_sdk + 拖拽示教），仿真版本验证的是软件链路和手感。
+- 仿真：键盘 / Xbox 手柄笛卡尔遥操作，验证整条软件链路（**抓取成功率 5/5**）
+- 真机：piper_sdk + D435i 相机，cv2 控制面板采集 **30 条示范**，训练 ACT 后自主抓取
+- 附带数据后处理（动作 EMA 平滑）与训练曲线可视化
+
+> 核心是**模仿学习**（监督回归），不是强化学习：没有 reward、没有 value function。
 
 ---
 
@@ -13,145 +17,143 @@
 |---|---|
 | 系统 | Ubuntu 24.04（x86_64） |
 | 显卡 | NVIDIA RTX 5060（8GB），驱动 ≥ 570 |
-| 环境管理 | conda（miniconda3） |
-| Python | 3.12 |
-| conda 环境 | 已建好的 `lerobot`（含 torch cu130 + lerobot 0.6.1 + piper 插件 + mujoco） |
+| Python | 3.12（conda 环境 `lerobot`） |
+| 关键依赖 | torch cu130、lerobot 0.6.1、mujoco、piper_sdk（V2 协议）、pyrealsense2 |
+| 真机 | 松灵 PiPER（CAN 接口 can0）+ Intel RealSense D435i |
 
 ```bash
-conda activate lerobot          # 每次进项目先激活
+conda activate lerobot
 cd /home/mage/piper_ws/lerobot_setup
 ```
 
+`common.sh` 里的 `sanitize_env()` 会清掉 `LD_LIBRARY_PATH` 和代理变量（否则会触发
+`cublasLtCreate` 崩溃和 httpx 代理错误）。所有脚本都通过它跑。
+
 ---
 
-## 二、核心 4 步（采集 → 训练 → 部署 → 看曲线）
+## 二、快速开始
 
-### 第 1 步：采集数据（遥操作）
+### A. 仿真链路（无需硬件）
 
 ```bash
-# Xbox 手柄遥操作（推荐，摇杆控制末端）
+# 1. 采集（手柄或键盘遥操作，采 30 条）
 python sim_collect_piper.py --num_episodes 30 --overwrite --controller gamepad
 
-# 或键盘遥操作
-python sim_collect_piper.py --num_episodes 30 --overwrite --controller keyboard
-```
+# 2. 训练 ACT
+bash train_piper.sh 20000
 
-**手柄按键**：
-
-| 手柄 | 作用 |
-|---|---|
-| 左摇杆 前后/左右 | 末端水平移动（x/y） |
-| 右摇杆 上下 | 末端升降（z） |
-| A 键 | 夹爪开合切换 |
-| B 键 | **丢弃本条**（失败数据不保存） |
-| Start | 下一条 episode |
-| Select | 退出 |
-
-**键盘按键**：`w/s` 前后、`a/d` 左右、`r/f` 升降、`g` 夹爪、`x` 丢弃、`n` 下一条、`q` 退出
-
-> 采集要点：
-> - 每条 = 一次完整的「靠近方块 → 夹爪闭合 → 抬起来」，别塞多个动作
-> - 抓失败了按 **B（或 x）** 当场丢弃，别留废数据
-> - `--num_episodes 30` 是"采满 30 条**好数据**"（丢弃的不占名额）
-
-### 第 2 步：训练 ACT
-
-```bash
-bash train_piper.sh 2000      # 先 2000 步快速验证（约 1 分钟）
-bash train_piper.sh 20000     # 正式训练（约 9 分钟）
-```
-
-- 训练时会**实时打印 loss**，并自动保存日志到 `~/lerobot_outputs/act_piper_keyboard.log`
-- 同时开启 **W&B** 实时曲线（浏览器打开终端里的 `Track this run` 链接）
-- 找不到 W&B 链接时：`grep "Track this run" ~/lerobot_outputs/act_piper_keyboard.log`
-
-### 第 3 步：部署推理（带图形界面）
-
-```bash
+# 3. 部署（MuJoCo viewer + 策略视角相机）
 bash rollout_piper.sh
-```
 
-会弹**两个窗口**：
-1. **MuJoCo 原生 viewer**：自由视角看机械臂（鼠标旋转/缩放）
-2. **"Top Camera (policy view)"**：顶部相机俯拍图 = 策略"眼睛"看到的观测
-
-终端打印每条「方块最高高度」，**>0.16 米 = 抓起来了**。
-
-### 第 4 步：画 loss 曲线
-
-```bash
+# 4. 画 loss 曲线
 python plot_training.py ~/lerobot_outputs/act_piper_keyboard.log
-# → 生成 *_curves.png（loss / l1_loss / kld_loss / lr 四张图）
 ```
 
----
+**手柄按键**：左摇杆平移、右摇杆升降、A 夹爪开合、B 丢弃、Start 下一条、Select 退出。
 
-## 三、关键指标怎么读
-
-| 指标 | 含义 | 健康表现 |
-|---|---|---|
-| **l1_loss** | 动作重建误差（**最重要**） | 持续下降，收敛到 0.1 左右 |
-| loss | 总损失 | 下降 |
-| kld_loss | VAE KL 散度 | 先降后稳 |
-| grdn | 梯度范数 | 稳定，不爆 NaN |
-| mem_gb | 显存 | 稳定，不 OOM |
-
-> **最终标准是 rollout 成功率，不是 loss 本身。** loss 降了但抓不起来 = 数据质量问题。
-
----
-
-## 四、版本管理（git）
-
-已用 git 管理，关键节点打了 tag：
+### B. 真机链路
 
 ```bash
-git log --oneline      # 看历史
-git tag                # 看标签
+# 0. 一次性检查硬件（CAN + 相机）
+bash 00_check_env.sh
+bash 01_setup_can.sh          # 配置 can0 为 1Mbps
 
-# 回退到某个版本
-git reset --hard <commit或tag>
+# 1. 采集（cv2 控制面板：START/END/HOME/DISCARD/QUIT）
+python real_collect.py --repo_id local/piper_real --overwrite
+
+# 2. 训练
+bash train_piper.sh 20000 local/piper_real
+
+# 3. 部署（START/END/EMERGENCY STOP/QUIT 面板）
+bash real_rollout.sh ~/lerobot_outputs/act_piper_real/checkpoints/last/pretrained_model
 ```
 
-| 标签 | 内容 |
+**真机采集要点**：
+- HOME 位姿 `[0.0, 0.8, -1.2, 0.0, 0.0, 0.0]`，START 会平滑回到 HOME
+- 50 Hz 控制、10 Hz 录制；`--stick_scale` 控制移动速度
+- 拖拽示教/遥操作时机器人处于重力补偿悬停模式（`MotionCtrl_1(0,0,0x01)`），退出不坠落
+
+---
+
+## 三、目录结构
+
+```
+lerobot_setup/
+├── piper_sim.py            # MuJoCo 仿真环境（Piper 模型、IK、相机、渲染）
+├── sim_collect_piper.py    # 仿真遥操作采集（手柄/键盘）
+├── sim_rollout_piper.py    # 仿真部署推理
+├── rollout_piper.sh        # 仿真部署启动脚本
+├── sim_demo.sh             # LeRobot 通用链路冒烟（pusht/aloha/libero）
+
+├── real_piper.py           # 真机环境封装（piper_sdk V2 + D435i）
+├── real_collect.py         # 真机 cv2 控制面板采集（含 IK EMA 平滑）
+├── real_rollout.py         # 真机 cv2 控制面板部署（含 50Hz 插值 + EMA）
+├── real_rollout.sh         # 真机部署启动脚本
+
+├── train_piper.sh          # 训练 ACT（日志 + W&B）
+├── plot_training.py        # 画 loss / l1_loss / kld_loss 曲线
+├── postprocess_smooth.py   # 后处理：对 action 做 EMA 平滑生成新数据集
+
+├── common.sh               # 环境清理 + conda 激活
+├── config.env              # 真机 CAN/相机配置
+├── 00~06_*.sh              # 真机分步脚本（检查/装环境/录制/训练/部署）
+└── assets/piper/           # DeepMind agilex_piper MJCF 模型 + 网格
+```
+
+---
+
+## 四、关键设计
+
+### 1. 观测管线（必须一致）
+相机预览保持 **4:3（480×360）**，再 resize 到 **96×96** 喂给策略。
+采集和部署必须走同一条管线，否则策略看到的分布不一致。
+
+### 2. 抖动治理（踩过的坑）
+| 问题 | 根因 | 解法 |
+|---|---|---|
+| 遥操作顿挫 | 控制频率太低 | **50 Hz 控制 + 10 Hz 录制** |
+| 录制动作抖动 | IK 零空间冗余漂移（J4/J6） | IK 输出 **EMA 平滑**（`--ik_smooth`）|
+| 部署抖动 | 策略本身输出振荡 | 50 Hz 动作插值 + 策略动作 EMA（`--action_smooth`）|
+
+### 3. 数据质量 > loss
+最终标准是 **rollout 成功率**，不是 loss。
+loss 降了但抓不起来 = 数据质量问题（示范动作本身抖/不一致）。
+
+### 4. 夹爪标定
+真机夹爪物理行程约 100 mm。在**闭合位置**设零位，再 `SetSDKGripperRangeParam(0.0, 0.1025)`。
+
+---
+
+## 五、实验结果
+
+| 链路 | 结果 |
 |---|---|
-| v1-baseline | 纯位置 IK 遥操 |
-| v2-yaw-test | 位置 + LT/RT 偏航（测试过，不好用已回退） |
-| v1.1-no-marker | 隐藏遥操绿球 |
+| 仿真 sim2sim | **5/5（100%）** 抓取成功，方块抬到 0.29~0.40 m |
+| 真机 ACT | 30 条示范，20000 步训练，loss 0.122 / l1_loss 0.087 |
 
 ---
 
-## 五、常见问题
+## 六、相关仓库
 
-- **训练报 `Output directory already exists`** → 脚本已处理（`rm -rf` 输出目录），若手动跑 `lerobot-train` 记得换 `--output_dir`
-- **训练报 `cublasLtCreate`** → 脚本已自动清 `LD_LIBRARY_PATH`，手动跑要 `env -u LD_LIBRARY_PATH`
-- **huggingface 报 proxy/socks 错误** → 已装 `socksio` + 脚本自动清代理变量
-- **rollout 末尾"段错误"** → 结果已全部打印，是 mujoco GL 退出清理的崩溃，不影响结果
-- **采集时夹爪惯性带歪手臂** → 已改斜坡开合（15 帧渐变）
-- **采集画面里绿球污染观测** → 已在渲染观测图时隐藏（`v1.1-no-marker` 起生效）
+- **piperx-mjlab**：在 MuJoCo Lab（MJLab）里用 **PPO 强化学习**训练 PiPER-X 抓 4cm 方块，
+  与这里的模仿学习互补（对比 RL vs IL 的差异）。
+- 论文：ACT（arXiv 2304.13705）、Diffusion Policy（2303.04137）、LeRobot（2602.22818）
 
 ---
 
-## 六、目录说明
+## 七、常见问题
 
-| 文件 | 作用 |
+| 现象 | 原因 / 解法 |
 |---|---|
-| `sim_collect_piper.py` | 手柄/键盘遥操作采集数据 |
-| `train_piper.sh` | 训练 ACT（含日志 + W&B） |
-| `rollout_piper.sh` | 部署推理（图形界面 + 相机视角） |
-| `sim_rollout_piper.py` | rollout 核心逻辑（手动归一化加载 ACT） |
-| `piper_sim.py` | Piper MuJoCo 仿真环境（含 IK、相机、绿球标记） |
-| `plot_training.py` | 画 loss 曲线 |
-| `sim_demo.sh` | 纯仿真冒烟（pusht/aloha/libero，验证 LeRobot 通用链路） |
-| `assets/piper/` | DeepMind 官方 `agilex_piper` MJCF 模型 |
-| `00~06_*.sh`、`config.env`、`common.sh` | 真机 LeRobot 脚本（CAN + piper_sdk，真机阶段用） |
+| `cublasLtCreate` 崩溃 | 未清 `LD_LIBRARY_PATH`，用 `common.sh`/`activate_env` |
+| huggingface proxy 报错 | 未清代理变量，同上 |
+| `Output directory already exists` | 用 `--overwrite`（会备份为 `.bak.<时间戳>`，不删数据）|
+| rollout 末尾段错误 | MuJoCo GL 退出清理崩溃，结果已打印，不影响 |
+| 相机 `Frame didn't arrive` | D435i 掉到 USB 2.1，检查 USB 3.2 连接 |
+| gripper 只开 9.7mm | 零位没在闭合位置设，重新标定 |
 
 ---
 
-## 七、当前成果
+## 八、License
 
-- **20000 步 ACT 策略，sim2sim 抓取成功率 5/5（100%）**，方块稳定抬到 0.29~0.40 米
-- loss 10.61 → 0.152，l1_loss 0.65 → 0.116
-
-**下一步方向**（二选一）：
-1. 加数据多样性（方块随机位置/朝向）再训，测泛化能力
-2. 回真机：把 `piper_sim.py` 换成 `piper_sdk` + CAN，遥操换成拖拽示教
+本项目代码用于学习/研究。`assets/piper/` 下的 MJCF 模型来自 DeepMind agilex_piper（Apache-2.0）。

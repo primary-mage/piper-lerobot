@@ -1,7 +1,33 @@
-# Python
+# ===== Python =====
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
 
-# 临时/生成文件
+# ===== 调试 / 临时产物 =====
+debug_*.csv
+*_test_*.png
+d435i_rgb_only.png
 /tmp/
 *.log
+*.mp4
+
+# ===== W&B =====
+wandb/
+
+# ===== 数据集 / 训练输出（体积大，不进 git）=====
+data/
+outputs/
+*.mp4
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+
+# ===== 模型权重（按需保留，默认忽略）=====
+*.pt
+*.pth
+*.onnx
