@@ -13,12 +13,16 @@ ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "
 
 ARM_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
 GRIPPER_JOINT = "joint7"  # joint8 通过 equality 镜像
+GRIPPER_CLOSED = 0.0      # joint7=0   → 两指间距 0（闭合）
+GRIPPER_OPEN = 0.035      # joint7=0.035 → 两指间距 ~5cm（张开）
 ACTUATOR_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 
 # 初始关节角（6 手臂 + 夹爪张开）
-# 2026-11-12 为「眼在手上相机」重新标定：工具轴朝下俯视桌面，方块落在画面中心附近。
-# （原值 [0, 0.8, -1.2, 0, 0, 0] 是给固定俯视相机用的，腕部相机会看不到桌面。）
-HOME_QPOS = np.array([0.1, 0.7, -1.0, 0.0, 1.2, 0.0, 0.0], dtype=np.float32)
+# 2026-11-12 为「眼在手上相机 + 苹果/香蕉分拣」重新标定：
+# 工具轴朝下俯视，红/黄色块上的苹果与香蕉分列画面左右。
+# （两块 20cm 色块总跨度 46cm > 相机视野 36cm，无法四角全收；HOME 取两者都可见的平衡点，
+#   接近/抓取时手臂移动到各自上方。原值 [0,0.8,-1.2,0,0,0] 是给固定俯视相机的。）
+HOME_QPOS = np.array([0.0, 0.6, -1.0, 0.0, 1.2, 0.0, 0.0], dtype=np.float32)
 
 # ===== 相机配置 =====
 # 腕部相机外参（相机光学系 → link6），来自真机手眼标定（2026-11-04）。
@@ -49,6 +53,37 @@ def _matrix_to_quat_wxyz(R):
     mujoco.mju_mat2Quat(quat, np.asarray(R, dtype=np.float64).reshape(9))
     return quat.tolist()
 
+# ===== 场景：水果分拣 =====
+TABLE_TOP_Z = 0.08  # 桌面上表面高度（table geom: pos_z=0.04, size_z=0.04）
+
+# 苹果：椭球近似（直径 ~6cm，高 ~5.6cm）
+APPLE_XY = (0.30, -0.13)
+APPLE_RXY = 0.030
+APPLE_RZ = 0.028
+APPLE_MASS = 0.150
+
+# 香蕉：沿圆弧排布的胶囊，总长约 14cm，粗 2.6cm
+BANANA_XY = (0.30, 0.13)
+BANANA_R = 0.013          # 单根胶囊半径（香蕉粗细的一半）
+BANANA_SEG_HALF = 0.014   # 胶囊圆柱段半长
+BANANA_SEGMENTS = 7
+BANANA_RADIUS = 0.115     # 弯曲半径（越小越弯）
+BANANA_ARC = 1.30         # 弧张角 (rad)
+BANANA_MASS = 0.120
+
+# 色块（20cm × 20cm × 1mm，纯视觉）
+MAT_HALF = 0.10
+MAT_THICK = 0.0005
+
+OBJECT_NAMES = ("apple", "banana")
+
+
+def _rot_y(angle):
+    """绕 Y 轴旋转矩阵。"""
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float64)
+
+
 # 关节限位（弧度），对应 piper.xml 的 range
 JOINT_LIMITS = {
     "joint1": (-2.618, 2.618),
@@ -77,7 +112,7 @@ class PiperEnv:
         self.camera = camera
 
         spec = mujoco.MjSpec.from_file(os.path.join(ASSET_DIR, "piper.xml"))
-        # 地面 + 桌子 + 方块 + 相机
+        # 地面 + 桌子 + 水果(苹果/香蕉) + 色块 + 相机
         spec.worldbody.add_geom(
             name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE,
             size=[0, 0, 0.05], rgba=[0.2, 0.3, 0.4, 1],
@@ -86,12 +121,61 @@ class PiperEnv:
             name="table", type=mujoco.mjtGeom.mjGEOM_BOX,
             size=[0.35, 0.30, 0.04], pos=[0.30, 0, 0.04], rgba=[0.75, 0.75, 0.75, 1],
         )
-        cube = spec.worldbody.add_body(name="cube", pos=[0.30, 0.05, 0.105])
-        cube.add_freejoint(name="cube_joint")
-        cube.add_geom(
-            name="cube_geom", type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=[0.025, 0.025, 0.025], mass=0.05, rgba=[0.9, 0.1, 0.1, 1],
+
+        # --- 苹果（真实曲面网格：视觉 + 凸包碰撞）---
+        spec.add_mesh(name="apple_mesh", file="fruits/apple.obj")
+        apple = spec.worldbody.add_body(name="apple", pos=[APPLE_XY[0], APPLE_XY[1], TABLE_TOP_Z + APPLE_RZ])
+        apple.add_freejoint(name="apple_joint")
+        g_apple = apple.add_geom(
+            name="apple_geom", type=mujoco.mjtGeom.mjGEOM_MESH,
+            mass=APPLE_MASS, rgba=[0.80, 0.10, 0.10, 1.0],
+            friction=[1.2, 0.1, 0.01],
         )
+        g_apple.meshname = "apple_mesh"
+        apple.add_geom(  # 果梗（纯视觉，不参与碰撞）
+            name="apple_stem", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=[0.004, 0.012], pos=[0, 0, APPLE_RZ + 0.002],
+            rgba=[0.30, 0.20, 0.08, 1.0], mass=0,
+            contype=0, conaffinity=0,
+        )
+
+        # --- 香蕉（真实曲面网格做视觉 + 胶囊组做碰撞；非凸体网格碰撞不可靠）---
+        spec.add_mesh(name="banana_mesh", file="fruits/banana.obj")
+        banana = spec.worldbody.add_body(name="banana", pos=[BANANA_XY[0], BANANA_XY[1], TABLE_TOP_Z + BANANA_R])
+        banana.add_freejoint(name="banana_joint")
+        g_banana = banana.add_geom(  # 视觉网格
+            name="banana_visual", type=mujoco.mjtGeom.mjGEOM_MESH,
+            mass=0, rgba=[0.95, 0.85, 0.15, 1.0],
+            contype=0, conaffinity=0,
+        )
+        g_banana.meshname = "banana_mesh"
+        for i in range(BANANA_SEGMENTS):
+            frac = 0.5 if BANANA_SEGMENTS == 1 else i / (BANANA_SEGMENTS - 1)
+            ang = (frac - 0.5) * BANANA_ARC
+            seg_x = BANANA_RADIUS * np.sin(ang)
+            seg_z = BANANA_RADIUS * (1.0 - np.cos(ang))
+            banana.add_geom(
+                name=f"banana_seg{i}", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                size=[BANANA_R, BANANA_SEG_HALF], pos=[seg_x, 0.0, seg_z],
+                quat=_matrix_to_quat_wxyz(_rot_y(ang)),
+                mass=BANANA_MASS / BANANA_SEGMENTS,
+                rgba=[0.95, 0.85, 0.15, 0.35],  # 碰撞体半透明（调试可见）
+                friction=[1.2, 0.1, 0.01],
+            )
+
+        # --- 20cm x 20cm 色块（纯视觉，不参与碰撞）---
+        # 色块用浅色底（物体鲜艳、底浅），避免和水果本身在视觉上混淆
+        for name, xy, rgba in (
+            ("mat_apple", APPLE_XY, [0.88, 0.58, 0.58, 0.70]),
+            ("mat_banana", BANANA_XY, [0.92, 0.88, 0.55, 0.70]),
+        ):
+            spec.worldbody.add_geom(
+                name=name, type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[MAT_HALF, MAT_HALF, MAT_THICK],
+                pos=[xy[0], xy[1], TABLE_TOP_Z + MAT_THICK],
+                rgba=rgba, contype=0, conaffinity=0, mass=0,
+            )
+
         # 相机：wrist = 眼在手上（挂在 link6），top = 固定俯视（eye-to-hand）
         if camera == "wrist":
             R_l6_mj = WRIST_CAM_EXTRINSICS[:3, :3] @ _OPTICAL_TO_MJ
@@ -120,7 +204,20 @@ class PiperEnv:
         self.arm_qpos_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in ARM_JOINTS]
         self.gripper_qpos_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_JOINT)
         self.act_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in ACTUATOR_NAMES]
-        self.cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
+        self.obj_joint_ids = {
+            name: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f"{name}_joint")
+            for name in OBJECT_NAMES
+        }
+        # qpos 地址 != joint id！多 freejoint 时必须用 jnt_qposadr
+        self.obj_qpos_adr = {
+            name: int(self.model.jnt_qposadr[jid]) for name, jid in self.obj_joint_ids.items()
+        }
+        self.obj_body_ids = {
+            name: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in OBJECT_NAMES
+        }
+        # 兼容旧接口：默认操作目标 = 苹果
+        self.active_object = "apple"
         # 夹爪两指 body id：IK 参考点用「两指中点」——开合对称，中点稳定不随夹爪动
         self.grasp_body_id7 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link7")
         self.grasp_body_id8 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link8")
@@ -132,18 +229,32 @@ class PiperEnv:
         return 7
 
     def reset(self, seed=0):
-        """重置：手臂回 home，方块随机落在桌面上。返回当前关节角(7维)。"""
+        """重置：手臂回 home，苹果/香蕉随机落在各自色块上。返回当前关节角(7维)。"""
         mujoco.mj_resetData(self.model, self.data)
         for i, qid in enumerate(self.arm_qpos_ids):
             self.data.qpos[qid] = HOME_QPOS[i]
-        self.data.qpos[self.gripper_qpos_id] = 0.0  # 夹爪张开
+        self.data.qpos[self.gripper_qpos_id] = GRIPPER_OPEN  # 夹爪张开（0=闭合, 0.035=张开）
 
         rng = np.random.default_rng(seed)
-        cube_x = 0.28 + rng.uniform(-0.03, 0.03)
-        cube_y = rng.uniform(-0.05, 0.10)
-        jid = self.cube_joint_id
-        self.data.qpos[jid:jid + 3] = [cube_x, cube_y, 0.105]
+        # 苹果：色块中心附近小范围随机
+        jid = self.obj_qpos_adr["apple"]
+        self.data.qpos[jid:jid + 3] = [
+            APPLE_XY[0] + rng.uniform(-0.02, 0.02),
+            APPLE_XY[1] + rng.uniform(-0.02, 0.02),
+            TABLE_TOP_Z + APPLE_RZ,
+        ]
         self.data.qpos[jid + 3:jid + 7] = [1, 0, 0, 0]
+
+        # 香蕉：位置小范围随机 + 朝向随机
+        jid = self.obj_qpos_adr["banana"]
+        yaw = rng.uniform(-0.6, 0.6)
+        self.data.qpos[jid:jid + 3] = [
+            BANANA_XY[0] + rng.uniform(-0.02, 0.02),
+            BANANA_XY[1] + rng.uniform(-0.02, 0.02),
+            TABLE_TOP_Z + BANANA_R,
+        ]
+        self.data.qpos[jid + 3:jid + 7] = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
+        self.active_object = "apple"
 
         mujoco.mj_forward(self.model, self.data)
         return self.get_qpos()
@@ -162,16 +273,45 @@ class PiperEnv:
             mujoco.mj_step(self.model, self.data)
 
         qpos = self.get_qpos()
-        cube_z = float(self.data.qpos[self.cube_joint_id + 2])
-        # 奖励：方块被抬得越高越好（>0.16 视为抓到并抬起）
-        reward = float(np.clip((cube_z - 0.11) / 0.06, 0.0, 1.0))
+        # 奖励：目标物体被抬得越高越好（>0.16 视为抓到并抬起）
+        obj_z = self.object_height()
+        rest_z = TABLE_TOP_Z + min(APPLE_RZ, BANANA_R)
+        reward = float(np.clip((obj_z - rest_z) / 0.06, 0.0, 1.0))
         return qpos, reward
 
+    # --- 物体查询（多物体）---
+    def object_position(self, name=None):
+        """物体位置 (3,)。name 默认当前操作目标。"""
+        name = name or self.active_object
+        adr = self.obj_qpos_adr[name]
+        return self.data.qpos[adr:adr + 3].copy()
+
+    def object_height(self, name=None):
+        """物体高度 z。name 默认当前操作目标。"""
+        name = name or self.active_object
+        return float(self.data.qpos[self.obj_qpos_adr[name] + 2])
+
+    def object_heights(self):
+        """所有物体高度 {name: z}，便于调试/判定。"""
+        return {n: self.object_height(n) for n in OBJECT_NAMES}
+
+    def max_object_height(self):
+        """所有物体中最高的高度（兼容"是否有物体被抓起来"的判定）。"""
+        return max(self.object_heights().values())
+
+    # --- 兼容旧接口（采集/部署脚本用 cube_*）---
     def cube_position(self):
-        return self.data.qpos[self.cube_joint_id:self.cube_joint_id + 3].copy()
+        return self.object_position()
 
     def cube_height(self):
-        return float(self.data.qpos[self.cube_joint_id + 2])
+        """当前操作目标的高度（旧接口：原为方块高度）。"""
+        return self.object_height()
+
+    def set_active_object(self, name):
+        """切换当前操作目标（apple / banana）。"""
+        if name not in self.obj_joint_ids:
+            raise ValueError(f"unknown object: {name}, choose from {OBJECT_NAMES}")
+        self.active_object = name
 
     def render_image(self, size=None):
         """顶部相机渲染图（RGB uint8）。size 指定输出边长，默认 image_size（数据集用）。

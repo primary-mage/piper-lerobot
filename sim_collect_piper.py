@@ -181,7 +181,7 @@ def main():
                 while state["toggle_count"] > 0:
                     state["toggle_count"] -= 1
                     gripper_goal = 0.035 if gripper_goal < 0.02 else 0.0
-                    print(f"  夹爪目标 → {'闭合' if gripper_goal > 0.02 else '张开'}")
+                    print(f"  夹爪目标 → {'张开' if gripper_goal > 0.02 else '闭合'}")
                 # 斜坡平滑过渡（避免惯性冲击带歪手臂）
                 ramp = 0.035 / GRIPPER_RAMP_STEPS
                 if gripper < gripper_goal:
@@ -196,7 +196,7 @@ def main():
 
                 if step % 50 == 0:
                     print(f"  [已存 {saved}/{args.num_episodes}] step={step} 末端={np.round(target_pos, 3)} "
-                          f"夹爪={'合' if gripper > 0.02 else '开'} 方块高={env.cube_height():.3f}")
+                          f"夹爪={'开' if gripper > 0.02 else '合'} 目标高={env.cube_height():.3f}")
 
                 img_native = env.render_image(480)   # 原生高分辨率顶部相机
                 img = cv2.resize(img_native, (96, 96))  # 数据集 96×96
