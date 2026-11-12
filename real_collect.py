@@ -132,12 +132,24 @@ def main():
     ap.add_argument("--debug_log", default=None)
     args = ap.parse_args()
 
-    if args.overwrite:
-        ds_dir = args.repo_id and os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.repo_id}")
-        if ds_dir and os.path.exists(ds_dir):
+    # 数据集目录处理：空壳（只有 meta、无 data/videos）自动清理；已有数据则要求 --overwrite
+    ds_dir = os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.repo_id}")
+    if os.path.exists(ds_dir):
+        if args.overwrite:
             backup = f"{ds_dir}.bak.{time.strftime('%Y%m%d_%H%M%S')}"
             shutil.move(ds_dir, backup)
-            print(f"[提示] 旧数据集已备份 → {backup}")
+            print(f"[提示] 旧数据集已备份（未删除）→ {backup}")
+        else:
+            has_data = os.path.isdir(os.path.join(ds_dir, "data")) or os.path.isdir(
+                os.path.join(ds_dir, "videos")
+            )
+            if not has_data:
+                shutil.rmtree(ds_dir)
+                print(f"[提示] 检测到空壳数据集（只有 meta、无数据），已自动清理：{ds_dir}")
+            else:
+                print(f"[错误] 数据集已存在且含数据：{ds_dir}")
+                print("       如需重新采集请加 --overwrite（会先备份旧数据）")
+                raise SystemExit(1)
 
     env = RealPiperEnv(can_interface=args.can_interface, image_size=96, move_spd_rate=args.move_spd_rate)
     ds = LeRobotDataset.create(repo_id=args.repo_id, fps=args.fps, features=build_features(), use_videos=True)
