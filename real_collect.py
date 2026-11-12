@@ -142,6 +142,14 @@ def main():
     env = RealPiperEnv(can_interface=args.can_interface, image_size=96, move_spd_rate=args.move_spd_rate)
     ds = LeRobotDataset.create(repo_id=args.repo_id, fps=args.fps, features=build_features(), use_videos=True)
 
+    # 明确告知当前输入模式（手柄/键盘），避免"遥控器没反应"的困惑
+    if args.controller == "gamepad":
+        print("[输入] 模式 = gamepad（手柄）：左摇杆平移、右摇杆升降、A=夹爪、B=丢弃")
+        print("       若摇杆无反应，先跑：python test_gamepad.py")
+    else:
+        print("[输入] 模式 = keyboard（键盘）：w/s/a/d 平移、r/f 升降、g 夹爪、x 丢弃")
+        print("       想用手柄请加参数：--controller gamepad")
+
     state = {"pressed": set(), "toggle_count": 0, "last_g": 0.0, "quit": False, "discard_episode": False}
     ui = {"start": False, "end": False, "home": False, "discard": False, "quit": False}
 
