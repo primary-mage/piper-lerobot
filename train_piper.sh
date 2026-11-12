@@ -9,6 +9,8 @@ activate_env   # 自动清 LD_LIBRARY_PATH + 代理（避免 cublasLt 崩溃）
 
 STEPS="${1:-20000}"
 DATASET="${2:-local/piper_real}"
+# W&B 默认关闭（token 失效/网络受限时会让训练直接失败）；需要时：WANDB_ENABLE=true bash train_piper.sh
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
 OUT="$HOME/lerobot_outputs/act_$(basename "$DATASET")"
 
 info "训练 ACT | 数据集: $DATASET | 步数: $STEPS | 输出: $OUT"
@@ -23,8 +25,8 @@ lerobot-train \
   --log_freq=100 \
   --output_dir="$OUT" \
   --job_name=act_piper \
-  --wandb.enable=true \
-  --wandb.mode=online \
+  --wandb.enable="$WANDB_ENABLE" \
+  --wandb.mode=offline \
   --wandb.project=piper_grasp \
   --policy.push_to_hub=false 2>&1 | tee "$OUT.log"
 
