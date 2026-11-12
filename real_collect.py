@@ -26,7 +26,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from sim_collect_piper import build_features, stick_to_delta, GRIPPER_RAMP_STEPS
 
 # 真机 home 姿态（6 关节角，弧度）
-HOME_QPOS_REAL = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0], dtype=np.float32)
+HOME_QPOS_REAL = np.array([0.0, 0.6, -1.0, 0.0, 1.15, 0.0], dtype=np.float32)
 
 WIN = "Piper Teleop (Camera + Control)"
 IMG_W = 480   # 预览宽度（保持 4:3）

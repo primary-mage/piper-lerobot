@@ -23,7 +23,7 @@ import torch
 from real_piper import RealPiperEnv
 from lerobot.policies.act.modeling_act import ACTPolicy
 
-HOME_QPOS_REAL = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0], dtype=np.float32)
+HOME_QPOS_REAL = np.array([0.0, 0.6, -1.0, 0.0, 1.15, 0.0], dtype=np.float32)
 
 WIN = "Real ACT (Camera + Control)"
 IMG_W, IMG_H, BAR = 480, 360, 90

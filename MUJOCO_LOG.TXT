@@ -1,0 +1,2 @@
+WARNING 2026年11月12日 星期四 15时52分26秒: Nan, Inf or huge value in QACC at DOF 14. The simulation is unstable. Time = 26.4260.
+
