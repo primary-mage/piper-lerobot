@@ -118,6 +118,7 @@ def draw_ui(img_rgb, mode, saved, total):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo_id", default="local/piper_real")
+    ap.add_argument("--task", default="grasp the object and lift it", help="任务描述（写入数据集的 task 字段）")
     ap.add_argument("--can_interface", default="can0")
     ap.add_argument("--num_episodes", type=int, default=30, help="显示用目标条数(不再自动退出，只能手动 QUIT)")
     ap.add_argument("--max_steps", type=int, default=400)
@@ -277,7 +278,7 @@ def main():
                         "next.reward": np.array([0.0], dtype=np.float32),
                         "next.done": np.array([False]),
                         "next.success": np.array([False]),
-                        "task": "grasp the object and lift it",
+                        "task": args.task,
                     })
                     if debug_w is not None:
                         debug_w.writerow([ctrl_step, "recording", *np.round(tel["target"], 4),

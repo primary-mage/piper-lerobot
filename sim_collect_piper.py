@@ -51,6 +51,7 @@ def build_features():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo_id", default="local/piper_keyboard")
+    ap.add_argument("--task", default="grasp the red cube and lift it", help="任务描述（写入数据集的 task 字段）")
     ap.add_argument("--root", default="", help="数据集目录；留空用 LeRobot 默认缓存")
     ap.add_argument("--num_episodes", type=int, default=10)
     ap.add_argument("--max_steps", type=int, default=400)
@@ -219,7 +220,7 @@ def main():
                     "next.reward": np.array([reward], dtype=np.float32),
                     "next.done": np.array([False]),
                     "next.success": np.array([False]),
-                    "task": "grasp the red cube and lift it",
+                    "task": args.task,
                 })
                 qpos = qpos_next
                 step += 1
