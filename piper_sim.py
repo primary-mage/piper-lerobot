@@ -16,7 +16,38 @@ GRIPPER_JOINT = "joint7"  # joint8 通过 equality 镜像
 ACTUATOR_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 
 # 初始关节角（6 手臂 + 夹爪张开）
-HOME_QPOS = np.array([0.0, 0.8, -1.2, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+# 2026-11-12 为「眼在手上相机」重新标定：工具轴朝下俯视桌面，方块落在画面中心附近。
+# （原值 [0, 0.8, -1.2, 0, 0, 0] 是给固定俯视相机用的，腕部相机会看不到桌面。）
+HOME_QPOS = np.array([0.1, 0.7, -1.0, 0.0, 1.2, 0.0, 0.0], dtype=np.float32)
+
+# ===== 相机配置 =====
+# 腕部相机外参（相机光学系 → link6），来自真机手眼标定（2026-11-04）。
+# 与视觉端 text_grasp.py 的 T_L6_CAM 同源；format：[R|t] 4x4，行主序。
+WRIST_CAM_EXTRINSICS = np.array(
+    [
+        [+0.010210, +0.928004, +0.372430, -0.0730],
+        [-0.999915, +0.006436, +0.011376, +0.0027],
+        [+0.008160, -0.372514, +0.927991, +0.0557],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float64,
+)
+
+# ROS 光学系(x 右, y 下, z 光轴) → MuJoCo 相机系(x 右, y 上, 光轴 -Z)
+# 两者差一个绕 X 轴 180° 的旋转。
+_OPTICAL_TO_MJ = np.diag([1.0, -1.0, -1.0])
+
+# D435i 彩色：16:9 时垂直 FOV≈42.5°；采集用 640x480(4:3) 时约 55°（水平约 69°）。
+# 取 55° 既贴近真机，又能让接近/抓取阶段的方块留在画面内（42.5° 时抓取位会贴边）。
+WRIST_FOVY = 55.0
+TOP_FOVY = 50.0
+
+
+def _matrix_to_quat_wxyz(R):
+    """3x3 旋转矩阵 → MuJoCo 四元数 (w, x, y, z)。"""
+    quat = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat, np.asarray(R, dtype=np.float64).reshape(9))
+    return quat.tolist()
 
 # 关节限位（弧度），对应 piper.xml 的 range
 JOINT_LIMITS = {
@@ -39,7 +70,7 @@ ARM_LIMITS = [
 class PiperEnv:
     """Piper 抓取仿真环境。"""
 
-    def __init__(self, image_size=96, render_width=480, render_height=480, camera="top"):
+    def __init__(self, image_size=96, render_width=480, render_height=480, camera="wrist"):
         self.image_size = image_size
         self.render_width = render_width
         self.render_height = render_height
@@ -61,9 +92,18 @@ class PiperEnv:
             name="cube_geom", type=mujoco.mjtGeom.mjGEOM_BOX,
             size=[0.025, 0.025, 0.025], mass=0.05, rgba=[0.9, 0.1, 0.1, 1],
         )
-        spec.worldbody.add_camera(
-            name="top", pos=[0.30, 0, 1.0], quat=[1, 0, 0, 0], fovy=50,
-        )
+        # 相机：wrist = 眼在手上（挂在 link6），top = 固定俯视（eye-to-hand）
+        if camera == "wrist":
+            R_l6_mj = WRIST_CAM_EXTRINSICS[:3, :3] @ _OPTICAL_TO_MJ
+            t_l6 = WRIST_CAM_EXTRINSICS[:3, 3]
+            quat = _matrix_to_quat_wxyz(R_l6_mj)
+            spec.body("link6").add_camera(
+                name="wrist", pos=t_l6.tolist(), quat=quat, fovy=WRIST_FOVY
+            )
+        else:
+            spec.worldbody.add_camera(
+                name="top", pos=[0.30, 0, 1.0], quat=[1, 0, 0, 0], fovy=TOP_FOVY,
+            )
         # 目标位置标记（绿色小球，mocap，显示 IK 目标点）
         marker = spec.worldbody.add_body(name="target_marker", pos=[0.30, 0.05, 0.20])
         marker.mocap = True
