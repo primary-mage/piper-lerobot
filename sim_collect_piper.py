@@ -61,14 +61,24 @@ def main():
     ap.add_argument("--overwrite", action="store_true", help="删除同名旧数据集后重新采集")
     args = ap.parse_args()
 
-    if args.overwrite:
-        ds_dir = args.root or os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.repo_id}")
-        if os.path.exists(ds_dir):
+    # 数据集目录处理：空壳（只有 meta、无 data/videos）自动清理；已有数据则要求 --overwrite
+    ds_dir = args.root or os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.repo_id}")
+    if os.path.exists(ds_dir):
+        if args.overwrite:
             backup = f"{ds_dir}.bak.{time.strftime('%Y%m%d_%H%M%S')}"
             shutil.move(ds_dir, backup)
             print(f"[提示] 旧数据集已备份（未删除）→ {backup}")
         else:
-            print(f"[提示] 无旧数据集，直接新建")
+            has_data = os.path.isdir(os.path.join(ds_dir, "data")) or os.path.isdir(
+                os.path.join(ds_dir, "videos")
+            )
+            if not has_data:
+                shutil.rmtree(ds_dir)
+                print(f"[提示] 检测到空壳数据集（只有 meta、无数据），已自动清理：{ds_dir}")
+            else:
+                print(f"[错误] 数据集已存在且含数据：{ds_dir}")
+                print("       如需重新采集请加 --overwrite（会先备份旧数据）")
+                raise SystemExit(1)
 
     env = PiperEnv(image_size=96)
     # 每帧推进的物理步数：让 1 帧 ≈ 1/fps 秒模拟时间（10fps 下 = 50 步 × 0.002s）
